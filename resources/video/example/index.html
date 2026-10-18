@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="regatta-video" content="width=1280,height=720,fps=30" />
+    <title>Regatta launch (example)</title>
+    <link rel="stylesheet" href="regatta-video.css" />
+    <script src="regatta-video.js"></script>
+    <style>
+      :root {
+        --navy: #0b1220;
+        --panel: #121a2a;
+        --line: #22304a;
+        --fg: #e8eef7;
+        --muted: #8fa1bd;
+        --teal: #2dd4bf;
+        --blue: #60a5fa;
+        --amber: #fbbf24;
+        --green: #34d399;
+        --red: #f87171;
+      }
+      #stage {
+        font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+        color: var(--fg);
+        background: var(--navy);
+      }
+      section[data-scene] {
+        background: radial-gradient(1200px 700px at 50% 30%, #13213a 0%, var(--navy) 60%);
+      }
+      h1 {
+        position: absolute;
+        left: 0;
+        right: 0;
+        margin: 0;
+        text-align: center;
+        font-weight: 750;
+        letter-spacing: -0.02em;
+      }
+
+      /* Scene 1: panes arrive in a grid */
+      .grid {
+        position: absolute;
+        left: 240px;
+        top: 120px;
+        width: 800px;
+        height: 330px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+      .pane {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        padding: 16px 18px;
+        animation: rise 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+      .pane:nth-child(2) { animation-delay: 150ms; }
+      .pane:nth-child(3) { animation-delay: 300ms; }
+      .pane:nth-child(4) { animation-delay: 450ms; }
+      .pane .name {
+        font: 600 18px/1 'SF Mono', Menlo, monospace;
+        color: var(--fg);
+      }
+      .pane .line {
+        height: 10px;
+        margin-top: 14px;
+        border-radius: 5px;
+        background: #1d2a42;
+        transform-origin: left center;
+        animation: type 900ms ease-out both;
+        animation-delay: inherit;
+      }
+      .pane .line.short { width: 60%; }
+      .dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 10px;
+        background: var(--blue);
+      }
+      .s1 h1 {
+        top: 500px;
+        font-size: 58px;
+        animation: up 700ms 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+
+      /* Scene 2: one agent needs you */
+      .s2 .grid .pane { animation: none; }
+      .chip {
+        float: right;
+        padding: 4px 12px;
+        border-radius: 999px;
+        font: 600 15px/1.2 -apple-system, sans-serif;
+      }
+      .chip.working { background: rgba(96, 165, 250, 0.15); color: var(--blue); }
+      .chip.ready { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+      .chip.waiting {
+        background: rgba(251, 191, 36, 0.18);
+        color: var(--amber);
+        animation: pulse 1.2s ease-in-out 0.6s 2 both;
+      }
+      .s2 .pane.focus {
+        border-color: var(--amber);
+        animation: glow 900ms ease-out 0.5s both;
+      }
+      .bell {
+        position: absolute;
+        right: 160px;
+        top: 70px;
+        width: 54px;
+        height: 54px;
+        border-radius: 16px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        display: grid;
+        place-items: center;
+        font: 700 22px/1 -apple-system, sans-serif;
+        color: var(--amber);
+        animation: pop 500ms cubic-bezier(0.3, 1.6, 0.5, 1) 0.8s both;
+      }
+      .s2 h1 {
+        top: 500px;
+        font-size: 54px;
+        animation: up 600ms 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+
+      /* Scene 3: two lanes race, checks decide */
+      .lane {
+        position: absolute;
+        left: 240px;
+        width: 800px;
+        height: 64px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        overflow: hidden;
+      }
+      .lane.a { top: 150px; }
+      .lane.b { top: 236px; }
+      .lane .fill {
+        position: absolute;
+        inset: 0;
+        transform-origin: left center;
+        background: linear-gradient(90deg, rgba(45, 212, 191, 0.25), rgba(45, 212, 191, 0.55));
+        animation: grow 1.8s cubic-bezier(0.4, 0, 0.2, 1) 0.2s both;
+      }
+      .lane.b .fill {
+        background: linear-gradient(90deg, rgba(96, 165, 250, 0.2), rgba(96, 165, 250, 0.45));
+        animation-duration: 2.3s;
+      }
+      .lane .label {
+        position: absolute;
+        left: 20px;
+        top: 20px;
+        font: 600 20px/1 'SF Mono', Menlo, monospace;
+      }
+      .checks {
+        position: absolute;
+        left: 240px;
+        top: 330px;
+        display: flex;
+        gap: 28px;
+        font: 500 22px/1 -apple-system, sans-serif;
+        color: var(--muted);
+      }
+      .checks span { animation: up 400ms both; }
+      .checks span:nth-child(1) { animation-delay: 1.4s; }
+      .checks span:nth-child(2) { animation-delay: 1.6s; }
+      .checks span:nth-child(3) { animation-delay: 1.8s; }
+      .checks b { color: var(--green); }
+      .s3 h1 {
+        top: 470px;
+        font-size: 54px;
+        animation: up 600ms 2.1s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+
+      /* Scene 4: the name */
+      .sail {
+        position: absolute;
+        left: 590px;
+        top: 150px;
+        width: 0;
+        height: 0;
+        border-left: 50px solid transparent;
+        border-right: 50px solid transparent;
+        border-bottom: 140px solid var(--teal);
+        animation: sail 900ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+      .s4 h1 {
+        top: 330px;
+        font-size: 96px;
+        animation: up 700ms 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+      }
+      .s4 p {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 460px;
+        margin: 0;
+        text-align: center;
+        font-size: 30px;
+        color: var(--muted);
+        animation: up 700ms 0.9s ease-out both;
+      }
+
+      @keyframes rise { from { opacity: 0; transform: translateY(26px) scale(0.98); } to { opacity: 1; transform: none; } }
+      @keyframes up { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: none; } }
+      @keyframes type { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+      @keyframes glow { from { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.5); } to { box-shadow: 0 0 0 14px rgba(251, 191, 36, 0); } }
+      @keyframes pop { from { opacity: 0; transform: scale(0.3); } to { opacity: 1; transform: none; } }
+      @keyframes grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @keyframes sail { from { opacity: 0; transform: translateY(40px) rotate(-8deg); } to { opacity: 1; transform: none; } }
+    </style>
+  </head>
+  <body>
+    <main id="stage">
+      <section class="s1" data-scene="panes" data-title="Side by side" data-duration="3">
+        <div class="grid">
+          <div class="pane"><span class="dot"></span><span class="name">claude</span><div class="line"></div><div class="line short"></div></div>
+          <div class="pane"><span class="dot"></span><span class="name">codex</span><div class="line"></div><div class="line short"></div></div>
+          <div class="pane"><span class="dot"></span><span class="name">gemini</span><div class="line"></div><div class="line short"></div></div>
+          <div class="pane"><span class="dot"></span><span class="name">shell</span><div class="line"></div><div class="line short"></div></div>
+        </div>
+        <h1>Every agent, side by side.</h1>
+      </section>
+
+      <section class="s2" data-scene="status" data-title="Who needs you" data-duration="3">
+        <div class="bell">1</div>
+        <div class="grid">
+          <div class="pane"><span class="name">claude</span><span class="chip working">working</span><div class="line"></div></div>
+          <div class="pane focus"><span class="name">codex</span><span class="chip waiting">needs you</span><div class="line"></div></div>
+          <div class="pane"><span class="name">gemini</span><span class="chip ready">ready</span><div class="line"></div></div>
+          <div class="pane"><span class="name">shell</span><span class="chip working">working</span><div class="line"></div></div>
+        </div>
+        <h1>See who needs you first.</h1>
+      </section>
+
+      <section class="s3" data-scene="checks" data-title="Checks decide" data-duration="3">
+        <div class="lane a"><div class="fill"></div><span class="label">claude</span></div>
+        <div class="lane b"><div class="fill"></div><span class="label">codex</span></div>
+        <div class="checks"><span><b>✓</b> tests</span><span><b>✓</b> typecheck</span><span><b>✓</b> lint</span></div>
+        <h1>Your checks pick the winner.</h1>
+      </section>
+
+      <section class="s4" data-scene="name" data-title="Regatta" data-duration="3">
+        <div class="sail"></div>
+        <h1>Regatta</h1>
+        <p>Free and open source</p>
+      </section>
+    </main>
+
+    <script type="application/json" id="regatta-captions">
+      [
+        { "start": 0.4, "end": 2.8, "text": "Run all your coding agents in one window." },
+        { "start": 3.3, "end": 5.8, "text": "The one that needs you comes first." },
+        { "start": 6.3, "end": 8.8, "text": "Race them on a task; your tests decide." },
+        { "start": 9.4, "end": 11.8, "text": "Regatta. Free and open source." }
+      ]
+    </script>
+
+    <script>
+      // Music: a soft four-chord progression, one chord per scene, with a plucked arpeggio and bass.
+      RegattaVideo.score = function (ctx, seconds) {
+        var out = ctx.createGain()
+        out.gain.value = 0.32
+        out.connect(ctx.destination)
+        var chords = [
+          [261.63, 329.63, 392.0],
+          [220.0, 261.63, 329.63],
+          [174.61, 220.0, 261.63],
+          [196.0, 246.94, 293.66]
+        ]
+        function note(freq, start, length, type, level) {
+          var osc = ctx.createOscillator()
+          var gain = ctx.createGain()
+          osc.type = type
+          osc.frequency.value = freq
+          gain.gain.setValueAtTime(0, start)
+          gain.gain.linearRampToValueAtTime(level, start + 0.02)
+          gain.gain.exponentialRampToValueAtTime(0.0001, start + length)
+          osc.connect(gain)
+          gain.connect(out)
+          osc.start(start)
+          osc.stop(start + length + 0.05)
+        }
+        var beat = 0.375
+        for (var bar = 0; bar < 4; bar++) {
+          var chord = chords[bar]
+          var t0 = bar * 3
+          note(chord[0] / 2, t0, 2.9, 'sine', 0.5)
+          for (var step = 0; step < 8; step++) {
+            var t = t0 + step * beat
+            if (t >= seconds) break
+            note(chord[step % 3] * (step >= 4 ? 2 : 1), t, 0.34, 'triangle', 0.22)
+          }
+        }
+      }
+    </script>
+  </body>
+</html>

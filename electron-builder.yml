@@ -1,0 +1,74 @@
+# Regatta packaging for macOS (Apple silicon). Build with: npm run dist
+# The app is ad-hoc signed only (identity: "-"), never notarized: the project has no paid Apple developer account. See docs/PACKAGING.md.
+
+appId: dev.regatta.app
+productName: Regatta
+copyright: Copyright (c) 2026 Regatta contributors
+
+directories:
+  output: dist
+  buildResources: build
+
+# Ship the built app (out/**), package.json and the production node_modules only.
+# electron-builder collects production dependencies separately and never packs devDependencies,
+# so these are exclusions layered on its default file set rather than a restrictive include list
+# (an include-only list would also strip the runtime node_modules the app needs).
+files:
+  - "!src/**"
+  - "!scripts/**"
+  - "!docs/**"
+  - "!build/**"
+  - "!resources/**"
+  - "!e2e/**"
+  - "!tsconfig*.json"
+  - "!electron.vite.config.ts"
+  - "!electron-builder.yml"
+  - "!package-lock.json"
+  - "!README.md"
+  - "!CONTRIBUTING.md"
+  - "!LICENSE"
+
+# @lydell/node-pty ships prebuilt N-API binaries, so there is nothing to rebuild here.
+npmRebuild: false
+
+# Native binaries and the platform package that loads them must sit on the real filesystem,
+# not inside the asar, or they cannot be dlopen'd.
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/@lydell/node-pty-*"
+
+# The main process reads process.resourcesPath/video when packaged (see src/main/index.ts).
+extraResources:
+  - from: resources/video
+    to: video
+
+# Single source of truth for artifact names so both targets get the -arm64 suffix.
+artifactName: "${productName}-${version}-${arch}.${ext}"
+
+mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: false
+  # Ad-hoc signing with the "-" identity. electron-builder special-cases this: it finds no
+  # keychain certificate, then signs with codesign -s - so the arm64 binary is launchable.
+  identity: "-"
+  notarize: false
+  extendInfo:
+    NSMicrophoneUsageDescription: "Regatta uses the microphone only while you dictate. Speech is turned into text on this Mac and the audio is deleted."
+    NSAppleEventsUsageDescription: "Dictate anywhere (Labs) types your words into the app in front."
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+
+dmg:
+  # Default layout: the app on the left, an Applications symlink on the right.
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications

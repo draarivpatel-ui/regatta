@@ -1,0 +1,7 @@
+{
+  "name": "spotfix-fixture",
+  "private": true,
+  "scripts": {
+    "test": "node src/app.js"
+  }
+}

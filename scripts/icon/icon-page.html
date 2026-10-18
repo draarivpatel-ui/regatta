@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- The Regatta app icon drawn from the Logo in src/renderer/src/components/marks.tsx, placed on the macOS icon grid. 1024 by 1024 canvas, rounded square 824 at (100,100) with corner radius 185, a soft shadow beneath it, transparent outside the square. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 1024px;
+        height: 1024px;
+        background: transparent;
+      }
+      svg {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+      <defs>
+        <linearGradient id="rg-app-icon" x1="100" y1="100" x2="924" y2="924" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#5eead4" />
+          <stop offset="1" stop-color="#0d9488" />
+        </linearGradient>
+        <filter id="rg-app-shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="26" />
+        </filter>
+      </defs>
+
+      <!-- Soft shadow cast under the rounded square. -->
+      <rect x="118" y="150" width="788" height="788" rx="185" fill="#042f2b" opacity="0.5" filter="url(#rg-app-shadow)" />
+
+      <!-- The icon tile. -->
+      <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#rg-app-icon)" />
+
+      <!-- The mark, scaled from the 24 unit Logo into the 824 square. -->
+      <g transform="translate(100,100) scale(34.333333)">
+        <path d="M11.2 4.6v11H5.6z" fill="#042f2b" />
+        <path d="M12.9 7.2v8.4h4.6z" fill="#042f2b" opacity=".62" />
+        <path
+          d="M4.8 18.6c2.4-1.3 4.8-1.3 7.2 0s4.8-1.3 7.2 0"
+          stroke="#042f2b"
+          stroke-width="1.5"
+          fill="none"
+          stroke-linecap="round"
+        />
+      </g>
+    </svg>
+  </body>
+</html>

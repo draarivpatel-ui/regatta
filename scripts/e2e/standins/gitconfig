@@ -1,0 +1,9 @@
+# The whole of git's global config for the tests. The end-to-end tests copy it into each fake home and the
+# unit tests copy it to a temp file (test/setup.ts), so no test sees the real ~/.gitconfig, its global hooks
+# or its commit signing. The two ignore/attributes lines keep the real global ignore file out as well.
+[user]
+	name = Regatta Test
+	email = test@example.com
+[core]
+	excludesFile = /dev/null
+	attributesFile = /dev/null
