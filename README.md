@@ -12,6 +12,12 @@ runs on macOS 13 and later, but older macOS versions have not been tried.
 > watch, Flows, and Spot fix) are marked Beta. Read [Safety](#safety) before using them on work you
 > care about.
 
+## Walkthrough Video
+
+<video src="docs/demo-720p.mp4" controls preload="metadata" width="100%"></video>
+
+[Download 1080p60 Walkthrough & Release v0.1.0 on GitHub](https://github.com/draarivpatel-ui/regatta/releases/tag/v0.1.0)
+
 ## Features
 
 Grouped the way the app is used. Names are the ones on screen. The first time Regatta
