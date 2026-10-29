@@ -152,6 +152,23 @@ describe('finding 1: absence is proven, directories and nested repositories are 
 
     expect(readFileSync(join(cwd, 'gone.txt', 'precious.txt'), 'utf8')).toBe('human\n')
   })
+
+  it('keeps an ignored file that was already there when a step removed its ignore rule (sol-loop S2)', async () => {
+    const cwd = workspace({ '.gitignore': 'secret.env\n', 'secret.env': 'the only copy\n' })
+    const { c } = make()
+    const step = await turn(c, 's1', cwd, 'drop the ignore rule', () => {
+      writeFileSync(join(cwd, '.gitignore'), '')
+      writeFileSync(join(cwd, 'made.txt'), 'agent\n')
+    })
+    expect(step.files.map((f) => f.path)).toContain('secret.env')
+
+    const res = await c.rollback(step.id)
+
+    expect(readFileSync(join(cwd, 'secret.env'), 'utf8')).toBe('the only copy\n')
+    expect(res.files.find((f) => f.path === 'secret.env')?.action).toBe('kept')
+    expect(readFileSync(join(cwd, '.gitignore'), 'utf8')).toBe('secret.env\n')
+    expect(existsSync(join(cwd, 'made.txt'))).toBe(false)
+  })
 })
 
 describe('finding 2: restore never follows symlinks out of the folder', () => {

@@ -1870,6 +1870,12 @@ export class Checkpoints {
             continue
           }
         }
+        // Missing from the start snapshot does not prove a file is the step's: one an ignore rule kept out
+        // of it (a rule the step then removed) was already here. Only a file made after the step began is deleted.
+        if (dir === 'rollback' && to.kind === 'absent' && g.st && g.st.birthtimeMs < step.startedAt) {
+          note(f, 'kept', 'not touched: it was here before this step began')
+          continue
+        }
         const item: PlanItem = { file: f, from, to, cur }
         if (to.kind === 'file' || to.kind === 'symlink') {
           item.extracted = join(tmpDir, String(n++))
