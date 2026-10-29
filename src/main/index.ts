@@ -226,7 +226,7 @@ else app.whenReady().then(async () => {
   // agents headless. Usage is read lazily, when a run starts or states are asked for.
   const budgets = new BudgetGuard({
     dataDir: app.getPath('userData'),
-    usage: () => readUsage({ sessions: () => s.list(), home: () => app.getPath('home') }),
+    usage: () => readUsage({ sessions: () => s.list(), home: () => app.getPath('home'), codexHomes: () => accounts.codexHomes() }),
     agentName: (agent) => agents.find((a) => a.kind === agent)?.name ?? agent,
     emit: (states) => send('budgets:changed', states)
   })
@@ -453,7 +453,7 @@ else app.whenReady().then(async () => {
   handle('relay:resumeLater', (id) => relay.resumeLater(id))
   handle('relay:cancel', (id) => relay.cancel(id))
   handle('relay:continueIn', (id, agent) => relay.continueIn(id, agent))
-  handle('usage:summary', () => readUsage({ sessions: () => s.list(), home: () => app.getPath('home') }))
+  handle('usage:summary', () => readUsage({ sessions: () => s.list(), home: () => app.getPath('home'), codexHomes: () => accounts.codexHomes() }))
   handle('night:state', () => night.state())
   handle('night:addTask', (task) => night.addTask(task))
   handle('night:removeTask', (id) => night.removeTask(id))

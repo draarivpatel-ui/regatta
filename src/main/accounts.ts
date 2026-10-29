@@ -80,6 +80,11 @@ export class AccountStore {
     return this.accountsRoot
   }
 
+  /** The folder of every saved Codex sign-in (its CODEX_HOME), for reading its usage. */
+  codexHomes(): string[] {
+    return this.data.accounts.filter((a) => a.cli === 'codex').map((a) => join(this.root(), a.cli, a.folder))
+  }
+
   async list(): Promise<AccountInfo[]> {
     const result: AccountInfo[] = []
 

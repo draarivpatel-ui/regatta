@@ -149,6 +149,23 @@ describe('readUsage', () => {
     expect(codex!.tokensMonth).toBe(460)
   })
 
+  it('adds the Codex tokens of saved sign-ins, which keep their files in their own folder (sol-loop S13)', async () => {
+    const home = tempHome()
+    const saved = join(tempHome(), 'codex', 'work')
+    rollout('2026-06', '15', 'rollout-own.jsonl', [
+      { timestamp: iso(NOW - HOUR), payload: { info: { total_token_usage: { input_tokens: 5, output_tokens: 5 } } } }
+    ], home)
+    const dir = join(saved, 'sessions', '2026', '06', '15')
+    writeLines(join(dir, 'rollout-saved.jsonl'), [
+      { timestamp: iso(NOW - HOUR), payload: { info: { total_token_usage: { input_tokens: 70, output_tokens: 30 } } } }
+    ])
+
+    const summary = await readUsage(deps({ home: () => home, codexHomes: () => [saved, join(home, '.codex')] }))
+    const codex = summary.agents.find((a) => a.agent === 'codex')
+    expect(codex!.runs).toBe(2)
+    expect(codex!.tokensToday).toBe(110)
+  })
+
   it('takes live limits from the newest valid line and reads both reset time formats', async () => {
     const home = tempHome()
     const fiveHourMs = NOW + 2 * HOUR + 10 * 60_000

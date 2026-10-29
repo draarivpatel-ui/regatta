@@ -3,7 +3,7 @@
 
 import * as nodeFs from 'node:fs'
 import * as nodeFsPromises from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { AGENT_ORDER } from '../shared/agents'
 import type { AgentKind, SessionInfo } from '../shared/types'
@@ -14,6 +14,8 @@ export interface UsageDeps {
   sessions: () => SessionInfo[]
   /** Home folder (Codex sessions live under ~/.codex/sessions). Overridable for tests. */
   home: () => string
+  /** The CODEX_HOME folder of every saved Codex sign-in; their sessions are under <folder>/sessions. */
+  codexHomes?: () => string[]
   now?: () => number
 }
 
@@ -335,13 +337,13 @@ interface LimitsReading {
  * Codex rollout files under the current month, one run per file. The last token count in a file is
  * that session's total. Lines carrying rate limits are kept, and the newest valid one wins.
  */
-async function codexTotals(home: string, now: number): Promise<{ totals: Totals; readings: LimitsReading[] }> {
+async function codexTotals(codexHome: string, now: number): Promise<{ totals: Totals; readings: LimitsReading[] }> {
   const totals = makeTotals()
   const readings: LimitsReading[] = []
   const today = new Date(now)
   const year = String(today.getFullYear())
   const month = String(today.getMonth() + 1).padStart(2, '0')
-  const monthDir = join(home, '.codex', 'sessions', year, month)
+  const monthDir = join(codexHome, 'sessions', year, month)
 
   let dayNames: string[]
   try {
@@ -413,7 +415,16 @@ export async function readUsage(deps: UsageDeps): Promise<UsageSummary> {
     for (const [agent, totals] of await claudeTotals(deps.sessions())) {
       if (totals.runs > 0) agents.push(toAgentUsage(agent, totals, now))
     }
-    const codex = await codexTotals(deps.home(), now)
+    const ownHome = resolve(deps.home(), '.codex')
+    const codex = await codexTotals(ownHome, now)
+    // Runs on a saved sign-in write their files in its own folder; their tokens count too. Live limits
+    // stay those of the computer's own sign-in.
+    for (const dir of new Set((deps.codexHomes?.() ?? []).map((d) => resolve(d)))) {
+      if (dir === ownHome) continue
+      const saved = await codexTotals(dir, now)
+      codex.totals.runs += saved.totals.runs
+      for (const [key, tokens] of saved.totals.days) addTokens(codex.totals.days, key, tokens)
+    }
     if (codex.totals.runs > 0) agents.push(toAgentUsage('codex', codex.totals, now))
     let newest: LimitsReading | null = null
     for (const reading of codex.readings) {

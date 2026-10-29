@@ -179,7 +179,8 @@ export class BudgetGuard {
   }
 
   private ledgerToday(agent: AgentKind): number {
-    // Codex usage already reads every rollout file on disk, so ledger tokens are not added for Codex.
+    // Codex usage already reads every rollout file on disk (the computer's sign-in and every saved one),
+    // so ledger tokens are not added for Codex.
     if (agent === 'codex') return 0
     const today = dayKey(this.now())
     return this.data.ledger[today]?.[agent] ?? 0
