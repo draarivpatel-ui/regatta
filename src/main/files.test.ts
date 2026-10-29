@@ -72,19 +72,19 @@ describe('paths that leave the project', () => {
   it('rejects a relative path that climbs out', async () => {
     await expect(listDir(root, '../')).rejects.toThrow('That path is outside the project')
     await expect(readFile(root, '../secret.txt')).rejects.toThrow('That path is outside the project')
-    await expect(writeFile(root, '../escape.txt', 'no')).rejects.toThrow('That path is outside the project')
+    await expect(writeFile(root, '../escape.txt', 'no', root)).rejects.toThrow('That path is outside the project')
   })
 
   it('rejects an absolute path outside the root', async () => {
     await expect(readFile(root, join(outside, 'secret.txt'))).rejects.toThrow('That path is outside the project')
-    await expect(writeFile(root, join(outside, 'secret.txt'), 'no')).rejects.toThrow('That path is outside the project')
+    await expect(writeFile(root, join(outside, 'secret.txt'), 'no', root)).rejects.toThrow('That path is outside the project')
     await expect(listDir(root, outside)).rejects.toThrow('That path is outside the project')
   })
 
   it('rejects a symlink that points at a folder outside the root', async () => {
     await expect(listDir(root, 'escape')).rejects.toThrow('That path is outside the project')
     await expect(readFile(root, 'escape/secret.txt')).rejects.toThrow('That path is outside the project')
-    await expect(writeFile(root, 'escape/secret.txt', 'no')).rejects.toThrow('That path is outside the project')
+    await expect(writeFile(root, 'escape/secret.txt', 'no', root)).rejects.toThrow('That path is outside the project')
   })
 })
 
@@ -116,14 +116,26 @@ describe('readFile', () => {
 
 describe('writeFile', () => {
   it('round trips a new file and an existing one', async () => {
-    await writeFile(root, 'notes.txt', 'hello world')
+    await writeFile(root, 'notes.txt', 'hello world', root)
     expect((await readFile(root, 'notes.txt')).content).toBe('hello world')
 
-    await writeFile(root, 'src/added.ts', 'export const a = 1\n')
+    await writeFile(root, 'src/added.ts', 'export const a = 1\n', root)
     expect((await readFile(root, 'src/added.ts')).content).toBe('export const a = 1\n')
   })
 
+  it('refuses to save a file that was opened in another project', async () => {
+    const other = mkdtempSync(join(tmpdir(), 'rg-files-other-'))
+    try {
+      writeFileSync(join(other, 'README.md'), '# Other\n')
+      const opened = await readFile(root, 'README.md')
+      await expect(writeFile(other, opened.path, 'edited in the first project', opened.root)).rejects.toThrow(/another project is open/)
+      expect((await readFile(other, 'README.md')).content).toBe('# Other\n')
+    } finally {
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
   it('needs the parent folder to exist already', async () => {
-    await expect(writeFile(root, 'nowhere/file.txt', 'x')).rejects.toThrow()
+    await expect(writeFile(root, 'nowhere/file.txt', 'x', root)).rejects.toThrow()
   })
 })

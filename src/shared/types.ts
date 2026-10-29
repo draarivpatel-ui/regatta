@@ -136,6 +136,8 @@ export interface FileEntry {
 
 export interface FileContent {
   path: string
+  /** The project folder it was read from: saving is refused once another project is open. */
+  root: string
   content: string
   size: number
   /** True when the file looks binary; content is then empty. */

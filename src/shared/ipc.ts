@@ -75,7 +75,7 @@ export interface InvokeChannels {
   'workspace:set': (root: string) => WorkspaceInfo
   'files:list': (dir: string) => FileEntry[]
   'files:read': (path: string) => FileContent
-  'files:write': (path: string, content: string) => void
+  'files:write': (path: string, content: string, openedIn: string) => void
   'search:run': (query: SearchQuery) => SearchResult
   'git:status': () => GitStatus | null
   /** Git panel. `cwd` null means the project folder; otherwise a folder a pane runs in. */

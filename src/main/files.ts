@@ -126,19 +126,26 @@ export async function listDir(root: string, dir: string): Promise<FileEntry[]> {
 export async function readFile(root: string, path: string): Promise<FileContent> {
   const abs = await resolveInside(root, path)
   const rel = normalize(path)
+  const from = resolve(root)
   const stat = await fs.stat(abs)
   if (stat.size > MAX_BYTES) {
-    return { path: rel, content: '', size: stat.size, binary: false, tooLarge: true }
+    return { path: rel, root: from, content: '', size: stat.size, binary: false, tooLarge: true }
   }
   const bytes = await fs.readFile(abs)
   const head = bytes.subarray(0, Math.min(bytes.length, SNIFF_BYTES))
   if (head.includes(0)) {
-    return { path: rel, content: '', size: stat.size, binary: true, tooLarge: false }
+    return { path: rel, root: from, content: '', size: stat.size, binary: true, tooLarge: false }
   }
-  return { path: rel, content: bytes.toString('utf8'), size: stat.size, binary: false, tooLarge: false }
+  return { path: rel, root: from, content: bytes.toString('utf8'), size: stat.size, binary: false, tooLarge: false }
 }
 
-/** Saves a text file. */
-export async function writeFile(root: string, path: string, content: string): Promise<void> {
+/**
+ * Saves a text file. `openedIn` is the `root` the file was read from: after a switch to another
+ * project the same relative path is a different file, so the save is refused.
+ */
+export async function writeFile(root: string, path: string, content: string, openedIn: string): Promise<void> {
+  if (resolve(openedIn) !== resolve(root)) {
+    throw new Error('Not saved: another project is open now. Copy your edits, then open the file again in this project.')
+  }
   await fs.writeFile(await resolveForWrite(root, path), content, 'utf8')
 }

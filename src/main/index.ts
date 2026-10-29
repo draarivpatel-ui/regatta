@@ -376,7 +376,7 @@ else app.whenReady().then(async () => {
   })
   handle('files:list', (dir) => listDir(root(), dir))
   handle('files:read', (path) => readFile(root(), path))
-  handle('files:write', (path, content) => writeFile(root(), path, content))
+  handle('files:write', (path, content, openedIn) => writeFile(root(), path, content, openedIn))
   handle('search:run', (query) => runSearch(root(), query, shellEnv))
   handle('git:status', () => gitStatus(root()))
   // The Git panel opens the project folder or a folder a pane runs in (its worktree), nothing else.

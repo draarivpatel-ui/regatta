@@ -61,7 +61,7 @@ export function FilesPanel(): React.JSX.Element {
     setSaving(true)
     setError(null)
     try {
-      await bridge.invoke('files:write', file.path, draft)
+      await bridge.invoke('files:write', file.path, draft, file.root)
       setFile((prev) => (prev ? { ...prev, content: draft } : prev))
     } catch (err) {
       setError(errorMessage(err))
