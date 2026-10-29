@@ -121,7 +121,7 @@ function sceneIdAt(scenes: VideoScene[], t: number): string | null {
 const cleanups: Array<(ok: boolean) => void> = []
 let finished = false
 
-function finish(code: number): void {
+export function finish(code: number): void {
   if (finished) return
   finished = true
   for (const fn of cleanups.splice(0).reverse()) {
@@ -434,18 +434,35 @@ interface FfmpegRun {
   stderr: string
 }
 
-function runFfmpeg(bin: string, args: string[]): Promise<FfmpegRun> {
+/** Runs one ffmpeg pass. It is stopped with the render: a pass still running then would outlive the app. */
+export function runFfmpeg(bin: string, args: string[]): Promise<FfmpegRun> {
   return new Promise((done) => {
+    if (finished) {
+      done({ code: null, stderr: 'The render was stopped.' })
+      return
+    }
     const child = spawn(bin, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    const stop = (): void => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+    cleanups.push(stop)
+    const forget = (): void => {
+      const at = cleanups.indexOf(stop)
+      if (at >= 0) cleanups.splice(at, 1)
+    }
     let stderr = ''
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
     })
     child.on('error', (err) => {
+      forget()
       stderr += err.message
       done({ code: null, stderr })
     })
-    child.on('close', (code) => done({ code, stderr }))
+    child.on('close', (code) => {
+      forget()
+      done({ code, stderr })
+    })
   })
 }
 
