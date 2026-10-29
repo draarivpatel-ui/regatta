@@ -469,7 +469,9 @@ else app.whenReady().then(async () => {
     accountsDir: accounts.root(),
     inUse: () =>
       [
-        ...s.list().map((x) => x.worktree),
+        // A pane's folder, not only the worktree it was made with: one opened from the Git panel, or
+        // restarted, runs in a worktree without that field.
+        ...s.list().flatMap((x) => [x.worktree, x.cwd]),
         ...heats.list().flatMap((h) => h.lanes.map((l) => l.worktree)),
         ...night.state().nights.flatMap((n) => n.runs.map((r) => r.worktree)),
         ...flows.runs().map((r) => r.worktree),
