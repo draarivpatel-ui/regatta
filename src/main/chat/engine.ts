@@ -185,6 +185,13 @@ export class ChatEngine {
     if (patch.model !== undefined) conversation.model = patch.model.trim()
     if (patch.agent !== undefined) {
       if (!CHAT_AGENTS.includes(patch.agent)) throw new Error(`${patch.agent} cannot chat yet.`)
+      if (patch.agent !== conversation.agent) {
+        if (conversation.status === 'running') throw new Error('Wait for the current reply or stop it.')
+        // The old CLI's session, model and sign-in mean nothing to another CLI: its next turn starts fresh.
+        conversation.cliSessionId = null
+        conversation.model = patch.model?.trim() ?? ''
+        conversation.account = null
+      }
       conversation.agent = patch.agent
       const allowed = REASONING_LEVELS[conversation.agent]
       if (!allowed.includes(conversation.reasoning ?? '')) conversation.reasoning = ''

@@ -723,6 +723,27 @@ describe('changing a conversation', () => {
     expect(() => h.engine.update(conversation.id, { reasoning: 'max' })).toThrow(/not offered by codex/)
   })
 
+  it('starts a fresh session when the agent changes, and refuses the change during a reply (sol-loop S10)', async () => {
+    const h = harness()
+    const conversation = h.engine.create({ agent: 'fake', model: 'fake-large' })
+    await h.engine.send(conversation.id, 'hello')
+    expect(byId(h, conversation.id).cliSessionId).toBeTruthy()
+    h.engine.update(conversation.id, { account: 'fake-work' })
+
+    const updated = h.engine.update(conversation.id, { agent: 'claude' })
+    expect(updated.agent).toBe('claude')
+    expect(updated.cliSessionId).toBeNull()
+    expect(updated.model).toBe('')
+    expect(updated.account).toBeNull()
+
+    const other = h.engine.create({ agent: 'fake' })
+    const running = h.engine.send(other.id, 'slow reply please')
+    await waitFor(() => byId(h, other.id).status === 'running')
+    expect(() => h.engine.update(other.id, { agent: 'claude' })).toThrow('Wait for the current reply or stop it.')
+    h.engine.stop(other.id)
+    await running
+  })
+
   it('resets reasoning when agent changes and the level is not offered by the new agent', () => {
     const h = harness()
     const conversation = h.engine.create({ agent: 'claude', reasoning: 'max' })
