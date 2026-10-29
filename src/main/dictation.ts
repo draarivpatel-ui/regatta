@@ -229,6 +229,8 @@ export class Dictation {
       signal.addEventListener('abort', onAbort, { once: true })
       void (async () => {
         const file = createWriteStream(dest)
+        // Opening and writing report failures as events; with no listener one would crash the app.
+        file.on('error', (err) => reject(err))
         try {
           const res = await fetch(url, { signal, redirect: 'follow' })
           if (!res.ok || !res.body) throw new Error(`The download failed (HTTP ${res.status}).`)

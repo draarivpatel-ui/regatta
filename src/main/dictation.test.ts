@@ -303,6 +303,25 @@ describe('download', () => {
     expect(existsSync(join(dataDir, 'models', 'ggml-base.en.bin'))).toBe(false)
   })
 
+  it('reports a file that cannot be written as a failed download instead of crashing (sol-loop S5)', async () => {
+    const payload = Buffer.alloc(64 * 1024, 0x44)
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Length': String(payload.byteLength) })
+      res.end(payload)
+    }
+    const dataDir = tempDir('regatta-dict-data-')
+    mkdirSync(join(dataDir, 'models'))
+    chmodSync(join(dataDir, 'models'), 0o555)
+    try {
+      const { dictation } = makeDictation(dataDir, { REGATTA_WHISPER_MODEL_URL: baseUrl })
+      const status = await dictation.download('base.en')
+      expect(status.error).toMatch(/EACCES/)
+      expect(status.download).toBeNull()
+    } finally {
+      chmodSync(join(dataDir, 'models'), 0o755)
+    }
+  })
+
   it('treats a finished file under 10 MB as a failure', async () => {
     const small = Buffer.alloc(64 * 1024, 0x42)
     handler = (_req, res) => {
