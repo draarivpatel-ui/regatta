@@ -286,7 +286,11 @@ what the user chose after being shown it; that is the user's own action, like em
    pathspecs `diffFrom` builds): their own config is not Regatta's to run. The trade-off, accepted: a lane whose only
    change is a new commit inside a submodule (or a nested repository) commits nothing for it, and `commitAll` answers
    "no changes"; the submodule's commit stays in its own repository (for a lane, under the kept git folder's
-   `modules/`, which Empty trash keeps), and a gitlink the user staged themselves stays staged, uncommitted.
+   `modules/`, which Empty trash keeps). A gitlink already staged in a lane (by the agent or by hand) is never added or
+   looked inside by Regatta: when it is the only change it stays staged, uncommitted, and when the lane has other
+   changes it is committed with them as staged, because `git commit` records the whole index (recording a staged
+   pointer reads nothing inside the submodule). The hand-off's own check for changes after an attempt
+   (`committableChanges` in `engine.ts`) reads status with the same flags.
 
 ## Known limitations (ship in the README)
 
