@@ -737,7 +737,11 @@ export class HeatEngine {
    * copy and excludes untracked nested git repositories so they stay untouched in the worktree.
    */
   private async committableChanges(runtime: Runtime, worktree: string): Promise<{ hasChanges: boolean; exclude: string[] }> {
-    const { stdout, stderr } = await gitFull(['--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all', '-z'], worktree)
+    // Never enters a submodule: its own config (a clean filter) is not Regatta's to run. commitAll leaves gitlinks out too.
+    const { stdout, stderr } = await gitFull(
+      ['--no-optional-locks', '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', 'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=all', '-z'],
+      worktree
+    )
     if (stderr.trim().length > 0) throw new Error(`git status warned: ${stderr.trim().split('\n')[0]}`)
     const clone = runtime.modules.get(worktree)
     const now = clone ? readModulesClone(worktree) : null

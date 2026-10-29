@@ -10,6 +10,7 @@ import {
   realpathSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
@@ -1180,6 +1181,40 @@ function holdCommitAdd(): { started: string; release: () => void; restore: () =>
     expect(h.engine.busyPaths()).toEqual([])
     expect(existsSync(attemptTree)).toBe(false)
   }, 60000)
+})
+
+describe('hand-off continuation and submodules', () => {
+  it('reads what changed without entering a submodule, so its clean filter never runs (sol-loop S6)', async () => {
+    const { engine } = harness([])
+    const base = temp()
+    const sub = join(base, 'sub')
+    mkdirSync(sub)
+    git(sub, 'init', '-b', 'main')
+    writeFileSync(join(sub, '.gitattributes'), '*.txt filter=f\n')
+    writeFileSync(join(sub, 'a.txt'), 'one\n')
+    git(sub, 'add', '-A')
+    git(sub, 'commit', '-m', 'sub')
+    const repo = join(base, 'repo')
+    mkdirSync(repo)
+    git(repo, 'init', '-b', 'main')
+    writeFileSync(join(repo, 'top.txt'), 'x\n')
+    git(base, 'clone', '-q', sub, join(repo, 'sm'))
+    git(repo, '-c', 'advice.addEmbeddedRepo=false', 'add', '-A')
+    git(repo, 'commit', '-m', 'with submodule')
+    const marker = join(base, 'sub-filter-ran')
+    const filter = join(base, 'strip.sh')
+    writeFileSync(filter, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 })
+    git(join(repo, 'sm'), 'config', 'filter.f.clean', filter)
+    const future = new Date(Date.now() + 10_000)
+    utimesSync(join(repo, 'sm', 'a.txt'), future, future)
+    writeFileSync(join(repo, 'top.txt'), 'changed\n')
+
+    const read = (engine as unknown as {
+      committableChanges: (runtime: { modules: Map<string, unknown> }, worktree: string) => Promise<{ hasChanges: boolean }>
+    }).committableChanges.bind(engine)
+    expect((await read({ modules: new Map() }, repo)).hasChanges).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+  }, 30_000)
 })
 
 describe('suggestOrder', () => {
