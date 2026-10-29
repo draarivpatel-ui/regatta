@@ -56,14 +56,21 @@ describe('conversations on disk', () => {
         cliSessionId: 'sess-9',
         tokens: 126,
         messages: [{ id: 'm1', role: 'user', text: 'hi', at: 3 }],
-        pending: { kind: 'workspace-write', request: 'edit the readme', summary: 'One line' }
+        pending: { id: 'w1', kind: 'workspace-write', request: 'edit the readme', summary: 'One line' }
       })
     )
     const loaded = loadConversations(dataDir)[0] as Conversation
     expect(loaded.cliSessionId).toBe('sess-9')
     expect(loaded.tokens).toBe(126)
     expect(loaded.messages).toEqual([{ id: 'm1', role: 'user', text: 'hi', at: 3 }])
-    expect(loaded.pending).toEqual({ kind: 'workspace-write', request: 'edit the readme', summary: 'One line' })
+    // The id comes back too, so the saved request can still be approved (sol-loop S12).
+    expect(loaded.pending).toEqual({ id: 'w1', kind: 'workspace-write', request: 'edit the readme', summary: 'One line' })
+  })
+
+  it('drops a saved write request that has no id, since it could never be approved (sol-loop S12)', () => {
+    const dataDir = tempDir()
+    saveConversation(dataDir, conversation({ pending: { kind: 'workspace-write', request: 'edit the readme', summary: 'One line' } }))
+    expect((loadConversations(dataDir)[0] as Conversation).pending).toBeNull()
   })
 
   it('keeps the chosen sign-in and reasoning effort, and drops an effort the agent does not offer (sol-loop S11)', () => {

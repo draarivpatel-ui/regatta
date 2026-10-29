@@ -134,8 +134,10 @@ function writeRequestFrom(raw: unknown): Conversation['pending'] {
   const object = record(raw)
   if (!object) return null
   const request = text(object['request'])
-  if (!request) return null
-  return { kind: 'workspace-write', request, summary: text(object['summary']) ?? request }
+  // Approvals are bound to the request id; one saved without an id could never be approved, so it is dropped.
+  const id = filled(object['id'])
+  if (!request || !id) return null
+  return { id, kind: 'workspace-write', request, summary: text(object['summary']) ?? request }
 }
 
 function messagesFrom(raw: unknown): ChatMessage[] {
