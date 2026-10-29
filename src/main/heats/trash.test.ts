@@ -1,5 +1,4 @@
 // Unit tests for moving lane worktrees to Regatta's trash and emptying trash in Settings > Storage.
-// Package: trash .
 
 import { execFileSync, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
@@ -1216,7 +1215,7 @@ describe('trashOwnedWorktree, listTrash and emptyTrash', { timeout: 20000 }, () 
   })
 })
 
-describe('trash-4: the git folder, re-attached worktrees, the last check, keep ref order, unfinished entries', { timeout: 30000 }, () => {
+describe('trash: the git folder, re-attached worktrees, the last check, keep ref order, unfinished entries', { timeout: 30000 }, () => {
   const REATTACHED = 're-attached elsewhere, left alone'
   const UNFINISHED = 'unfinished; Empty trash finishes it'
 
@@ -1240,7 +1239,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     return sh(['branch', '--list', branch], repo).includes(branch)
   }
 
-  it('keeps the git folder, its lock and the lane branch when a submodule initialised in the lane holds a commit (Sonnet P1-1)', async () => {
+  it('keeps the git folder, its lock and the lane branch when a submodule initialised in the lane holds a commit', async () => {
     const base = temp('regatta-trash-sm-')
     const sub = join(base, 'sub')
     mkdirSync(sub)
@@ -1285,7 +1284,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     expect(subCommits()).toContain(subCommit)
   })
 
-  it('keeps the git folder while a rebase --autostash is in progress (Sonnet P3-3)', async () => {
+  it('keeps the git folder while a rebase --autostash is in progress', async () => {
     const { repo, worktreesDir, path, branch, record } = await makeLane('autostash-lane')
     const gitDir = record.identity!.split('|')[0]!
     commitIn(path, 'README.md', 'lane version\n')
@@ -1336,7 +1335,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     }
   }, 60000)
 
-  it('never loses a commit made at the moment the entry folder is deleted (Sonnet P3-1)', async () => {
+  it('never loses a commit made at the moment the entry folder is deleted', async () => {
     const { repo, worktreesDir, record } = await makeLane('window-lane')
     const res = await trashOwnedWorktree(record)
     expect(res.status).toBe('trashed')
@@ -1364,7 +1363,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     expect(sh(['rev-list', '--all', '--reflog'], repo)).toContain(landed)
   })
 
-  it('leaves alone a trashed worktree the user copied back to its original path and re-attached (Argon P1-1 case A)', async () => {
+  it('leaves alone a trashed worktree the user copied back to its original path and re-attached', async () => {
     const { repo, worktreesDir, path, branch, record } = await makeLane('case-a-lane')
     const gitDir = record.identity!.split('|')[0]!
     const res = await trashOwnedWorktree(record)
@@ -1400,7 +1399,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
   })
 
   for (const variant of ['repair-failed', 'lost-record'] as const) {
-    it(`leaves alone a trashed worktree the user copied to another path and re-attached, ${variant} (Argon P1-1 case B)`, async () => {
+    it(`leaves alone a trashed worktree the user copied to another path and re-attached, ${variant}`, async () => {
       const { repo, worktreesDir, branch, record } = await makeLane(`case-b-${variant}`)
       const gitDir = record.identity!.split('|')[0]!
       const res = await trashOwnedWorktree(record)
@@ -1442,7 +1441,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     })
   }
 
-  it('makes the worktree HEAD the first parent of the keep ref after a detach and a commit in the trash (Argon P3-2)', async () => {
+  it('makes the worktree HEAD the first parent of the keep ref after a detach and a commit in the trash', async () => {
     const { repo, worktreesDir, path, record } = await makeLane('first-parent-lane')
     commitIn(path, 'work.txt', 'lane work\n')
     const res = await trashOwnedWorktree(record)
@@ -1457,7 +1456,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     expect(sh(['rev-parse', `${res.keepRef!}^1`], repo).trim()).toBe(late)
   })
 
-  it('finishes an entry left holding only entry.json by an interrupted Empty trash (Sonnet P3-4)', async () => {
+  it('finishes an entry left holding only entry.json by an interrupted Empty trash', async () => {
     const { repo, worktreesDir, branch, record } = await makeLane('unfinished-json-lane')
     const gitDir = record.identity!.split('|')[0]!
     const res = await trashOwnedWorktree(record)
@@ -1497,7 +1496,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
     expect(sh(['rev-list', res.keepRef!], repo)).toContain(late)
   })
 
-  it('finishes an entry left as an empty folder without .git by an interrupted Empty trash, also with entry.json lost (Argon P3-3)', async () => {
+  it('finishes an entry left as an empty folder without .git by an interrupted Empty trash, also with entry.json lost', async () => {
     const { repo, worktreesDir, branch, record } = await makeLane('unfinished-empty-lane')
     const gitDir = realpathSync(record.identity!.split('|')[0]!)
     const res = await trashOwnedWorktree(record)
@@ -2097,7 +2096,7 @@ describe('trash-4: the git folder, re-attached worktrees, the last check, keep r
 
     // Regatta repaired this entry when it trashed it, so a git folder naming the original path was pointed there by
     // someone else: it stays the user's even once nothing is at that path (a copy renamed away for a moment looks
-    // the same; trash-4 review 2026-10-25 finding 1). The reason gives the one command that hands it back.
+    // the same; found 2026-10-25). The reason gives the one command that hands it back.
     rmSync(path, { recursive: true })
     const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
     expect(again).toHaveLength(1)

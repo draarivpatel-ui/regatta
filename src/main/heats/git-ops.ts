@@ -1,6 +1,5 @@
 // Git helpers for heats: worktrees under one folder, lane commits, live diffs, merges.
 // Every command is an argument list for execFile, never a shell string, and always has a timeout.
-// Package: heats-engine .
 
 import { execFile, execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'

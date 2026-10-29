@@ -1,4 +1,4 @@
-// Sandbox tests for Regatta's automatic git calls .
+// Sandbox tests for Regatta's automatic git calls.
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
@@ -140,7 +140,7 @@ describe('1. Finding the filters fails closed (P1)', () => {
     expect(existsSync(marker)).toBe(false)
   }, 30_000)
 
-  it('(a1b) refuses with its name when a filter driver or config hook name contains "=" (Argon P1-1)', async () => {
+  it('(a1b) refuses with its name when a filter driver or config hook name contains "="', async () => {
     const repoFilter = temp('regatta-sandbox-eq-filter-')
     sh(['init', '-b', 'main'], repoFilter)
     writeFileSync(join(repoFilter, 'a.txt'), 'a\n')
@@ -179,7 +179,7 @@ describe('1. Finding the filters fails closed (P1)', () => {
     expect(existsSync(hookMarker)).toBe(false)
   }, 30_000)
 
-  it('finds a clean filter whose value starts with a newline so commitAll refuses (Argon P2-4)', async () => {
+  it('finds a clean filter whose value starts with a newline so commitAll refuses', async () => {
     const repo = temp('regatta-sandbox-nl-filter-')
     sh(['init', '-b', 'main'], repo)
     writeFileSync(join(repo, '.gitattributes'), '*.txt filter=lfs\n')
@@ -298,7 +298,7 @@ describe('3. A failed measurement is not zero (P2)', () => {
     await expect(diffBetween(repo, base, 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')).rejects.toThrow(/bad object|unknown revision|fatal/i)
   }, 30_000)
 
-  it('gives a number rather than an error when the index has a merge conflict (: needs merge, Sonnet P3-5)', async () => {
+  it('gives a number rather than an error when the index has a merge conflict (: needs merge)', async () => {
     const repo = temp('regatta-sandbox-conflict-')
     sh(['init', '-b', 'main'], repo)
     writeFileSync(join(repo, 'b.txt'), 'base\n')
@@ -326,7 +326,7 @@ describe('3. A failed measurement is not zero (P2)', () => {
     expect(stat.added).toBeGreaterThan(0)
   }, 30_000)
 
-  it('never runs a submodule-local clean filter during diffFrom or diffBetween (Sonnet P3-1)', async () => {
+  it('never runs a submodule-local clean filter during diffFrom or diffBetween', async () => {
     const sub = temp('regatta-sandbox-sub-')
     sh(['init', '-b', 'main'], sub)
     writeFileSync(join(sub, 'a.txt'), 'a\n')
@@ -408,7 +408,7 @@ describe('4. commitAll in a filter repository', () => {
   }, 60_000)
 })
 
-describe('5. Regatta never enters a submodule or nested repository (Sonnet P3-2, Argon P3-1)', () => {
+describe('5. Regatta never enters a submodule or nested repository', () => {
   /** A repository with a submodule `sm` whose own config has a clean filter, and a stat-dirty tracked file inside it. */
   function withSubmodule(): { repo: string; marker: string } {
     const base = temp('regatta-sandbox-sm-')

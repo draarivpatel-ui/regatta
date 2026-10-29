@@ -67,8 +67,7 @@ what the user chose after being shown it; that is the user's own action, like em
      or stash them") when it would change it (checked on git 2.54, 2026-10-17).
 2. **Retiring a lane worktree: moved to Regatta's trash, never deleted** (`trashOwnedWorktree` in
    `src/main/heats/git-ops.ts`, used by heats, hand-offs, night watch, flows and Storage). Regatta never
-   deletes a folder the user or their programs could have touched. (2026-10-16 decision. Eight review rounds,
-   V1 to V8, each found a new way for "prove the worktree is untouched, then delete it" to be wrong: a writer
+   deletes a folder the user or their programs could have touched. (Repeated review rounds each found a new way for "prove the worktree is untouched, then delete it" to be wrong: a writer
    that opened a file after the last scan, a filter that ran during the check, metadata the check did not
    read. A decision to destroy something based on inspecting it is a race against everyone who can change
    it; the only end to that race is not to destroy.) When an engine or Storage is done with a lane worktree:
@@ -107,8 +106,7 @@ what the user chose after being shown it; that is the user's own action, like em
      and its branch stays checked out there (git refuses to delete a branch checked out in a worktree). If
      repair is skipped or fails, `entry.json` says so and listing the trash tries again; the commits are
      already kept either way.
-   - **The worktree's git folder is deleted only when Regatta knows everything in it** (2026-10-17 re-reviews:
-     a submodule initialised in a lane keeps its whole repository under `<git folder>/modules/`, and `rebase
+   - **The worktree's git folder is deleted only when Regatta knows everything in it** (a submodule initialised in a lane keeps its whole repository under `<git folder>/modules/`, and `rebase
      --autostash` keeps uncommitted work under `rebase-merge/`, so deleting the folder after keeping the lane's own
      commits still lost work). Empty trash deletes `<common dir>/worktrees/<id>` only when every entry in it is on a
      short known list (`KNOWN_GIT_FOLDER_FILES` in `git-ops.ts`): the regular files `HEAD`, `ORIG_HEAD`, `FETCH_HEAD`,
@@ -127,7 +125,7 @@ what the user chose after being shown it; that is the user's own action, like em
      verified repair or when Empty trash writes a lost `entry.json` again from a `gitdir` naming the entry, and never
      cleared, since repair is retried only for entries that are not repaired),
      a `gitdir` naming `<originalPath>/.git` can only have been written by the user re-attaching a copy there, so it
-     is the user's even while nothing is at the original path (2026-10-25 trash-4 review, finding 1: a copy put back
+     is the user's even while nothing is at the original path (2026-10-25 fix: a copy put back
      at the original path, repaired and then renamed away before Empty trash lost its git folder, index and branch).
      If `gitdir` names any other path, whether or not
      anything is there at that moment (a copy the user restored and repaired, at the original path or anywhere else,
@@ -214,7 +212,7 @@ what the user chose after being shown it; that is the user's own action, like em
      `realpathSync` of every ancestor and of the working folder itself is strictly inside `realpathSync` of that
      worktree. If any segment is a symlink leading outside it (or a dangling link), the step is refused before any
      folder is created or anything runs, with `"Refused: the project folder inside the worktree leads outside it
-     (a symlink)."` (2026-10-17: heats had this since V8; Gemini 4 Argon found night watch and flows did not.)
+     (a symlink)."`
 3. **Deleting an engine's branch** (`deleteOwnedBranch`). A lane branch stays while its worktree is in the
    trash (it is checked out there) and is deleted when that trash entry is emptied. It is deleted only when the branch is not checked out
    anywhere and points exactly at the commit the engine recorded (the tested commit, or the start

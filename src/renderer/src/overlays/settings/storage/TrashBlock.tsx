@@ -5,14 +5,18 @@ import { FolderOpen, Trash2 } from 'lucide-react'
 import type { EmptyTrashEntryReport, TrashEntry } from '@shared/types'
 import { basename } from '../../../lib/format'
 import { Button } from '../../../components/ui'
+import {
+  ALTERED_TRASH_ENTRY as ALTERED_ENTRY_STATE,
+  MOVED_OUT_TRASH_ENTRY as MOVED_OUT_ENTRY_STATE,
+  REATTACHED_TRASH_ENTRY as REATTACHED_ENTRY_STATE,
+  UNFINISHED_TRASH_ENTRY as UNFINISHED_ENTRY_STATE
+} from '@shared/trash'
 import { movedLabel, upToBytesLabel } from './labels'
 
-const ALTERED_ENTRY_STATE = 'altered, left alone'
-const MOVED_OUT_ENTRY_STATE = 'moved out of the trash; Regatta leaves it and its git records alone'
-
+/** States in which Empty trash leaves the entry alone. */
 function specialEntryState(entry: TrashEntry): string | null {
   const reason = entry.repairError ?? null
-  if (reason === ALTERED_ENTRY_STATE || reason === MOVED_OUT_ENTRY_STATE) return reason
+  if (reason === ALTERED_ENTRY_STATE || reason === MOVED_OUT_ENTRY_STATE || reason === REATTACHED_ENTRY_STATE) return reason
   return null
 }
 
@@ -89,9 +93,11 @@ export function TrashBlock({
                         {' · '}
                         {specialState
                           ? specialState
-                          : entry.repaired
-                            ? 'repaired'
-                            : `not repaired${entry.repairError ? ` (${entry.repairError})` : ''}`}
+                          : entry.repairError === UNFINISHED_ENTRY_STATE
+                            ? UNFINISHED_ENTRY_STATE
+                            : entry.repaired
+                              ? 'repaired'
+                              : `not repaired${entry.repairError ? ` (${entry.repairError})` : ''}`}
                       </p>
                       <p className="mt-0.5 text-[11.5px] text-faint">
                         {upToBytesLabel(entry.bytes)} · {movedLabel(entry.movedAt, now)} · {changedSinceMovedText(entry.changedSinceMoved)}
@@ -166,6 +172,13 @@ export function TrashBlock({
                       .join(', ')}
                   </span>
                 </div>
+              )}
+
+              {toDelete.length > 0 && (
+                <p className="mt-1 text-[12px] text-muted" data-testid="storage-empty-trash-whole-folder">
+                  Each folder is deleted with everything in it, including any repository nested inside it (a volume mounted inside is never entered). The lane&apos;s own
+                  commits stay kept under refs/regatta/discarded.
+                </p>
               )}
 
               {emptyError && <p className="mt-2 text-[12px] text-st-failed">{emptyError}</p>}

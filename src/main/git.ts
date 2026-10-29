@@ -86,8 +86,13 @@ export async function gitStatus(root: string): Promise<GitStatus | null> {
   const branch = (await tryGit([...settings, 'rev-parse', '--abbrev-ref', 'HEAD'], root, SANDBOX_ENV_OVERRIDES))?.trim() ?? null
   // A read must not run user programs or fetch: sandboxGitArgs disables hooks, fsmonitor and filter drivers,
   // --no-optional-locks skips writing the index, and SANDBOX_ENV_OVERRIDES disables lazy fetch and transport.
+  // Submodules are not entered: their own config (a clean filter) is out of reach of the sandbox flags.
   const changes = parsePorcelain(
-    await git(['--no-optional-locks', ...settings, 'status', '--porcelain=v1', '-z'], root, SANDBOX_ENV_OVERRIDES)
+    await git(
+      ['--no-optional-locks', ...settings, '-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all', 'status', '--porcelain=v1', '-z', '--ignore-submodules=all'],
+      root,
+      SANDBOX_ENV_OVERRIDES
+    )
   )
   return { branch, changes }
 }

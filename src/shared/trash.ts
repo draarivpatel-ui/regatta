@@ -1,6 +1,6 @@
 // The states a Regatta trash entry is listed in, shared by the main process (git-ops.ts) and Settings > Storage
 // (TrashBlock.tsx), so a reworded state can never fall through to a plain error in the renderer.
-// Package: trash-4 (docs/tasks/trash-4.md, docs/design/safety.md mechanism 2).
+// See docs/design/safety.md, mechanism 2.
 
 /** An entry whose folder or `entry.json` is not the shape Regatta made: never repaired, never emptied. */
 export const ALTERED_TRASH_ENTRY = 'altered, left alone'

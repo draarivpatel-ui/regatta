@@ -1,7 +1,7 @@
 // Worktree helpers against real git repositories in temp folders.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -154,6 +154,38 @@ describe('gitStatus runs no user programs', () => {
 
     // Positive control: plain git status runs the clean filter on the stat-dirty file.
     utimesSync(readme, new Date(Date.now() + 20_000), new Date(Date.now() + 20_000))
+    sh(['status', '--porcelain=v1'], repo)
+    expect(existsSync(marker)).toBe(true)
+  }, 30000)
+  it('never enters a submodule, so the submodule\'s own clean filter never runs', async () => {
+    const base = temp('regatta-git-sm-')
+    const sub = join(base, 'sub')
+    mkdirSync(sub)
+    sh(['init', '-b', 'main'], sub)
+    writeFileSync(join(sub, '.gitattributes'), '*.txt filter=f\n')
+    writeFileSync(join(sub, 'a.txt'), 'one\n')
+    sh(['add', '-A'], sub)
+    sh([...IDENTITY, 'commit', '-m', 'sub'], sub)
+    const repo = join(base, 'repo')
+    mkdirSync(repo)
+    sh(['init', '-b', 'main'], repo)
+    writeFileSync(join(repo, 'top.txt'), 'x\n')
+    sh(['clone', '-q', sub, join(repo, 'sm')], base)
+    sh(['-c', 'advice.addEmbeddedRepo=false', 'add', '-A'], repo)
+    sh([...IDENTITY, 'commit', '-m', 'with submodule'], repo)
+    const marks = temp('regatta-git-sm-marks-')
+    const marker = join(marks, 'sub-filter-ran')
+    const cleanScript = join(marks, 'clean.sh')
+    writeFileSync(cleanScript, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 })
+    sh(['config', 'filter.f.clean', cleanScript], join(repo, 'sm'))
+    const future = new Date(Date.now() + 10_000)
+    utimesSync(join(repo, 'sm', 'a.txt'), future, future)
+
+    const status = await gitStatus(repo)
+    expect(status?.branch).toBe('main')
+    expect(existsSync(marker)).toBe(false)
+
+    // Positive control: plain git status enters the submodule and runs its filter.
     sh(['status', '--porcelain=v1'], repo)
     expect(existsSync(marker)).toBe(true)
   }, 30000)

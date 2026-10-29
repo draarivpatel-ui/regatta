@@ -1,5 +1,5 @@
-// Regression tests for the three ways Empty trash lost a user's work (audit 2026-10-26, finding w-regatta-01,
-// and the 2026-10-25 trash-4 review, finding 1). Each test asserts only that the work survives, never the
+// Regression tests for the three ways Empty trash lost a user's work (found 2026-10-25 and 2026-10-26).
+// Each test asserts only that the work survives, never the
 // wording of the result, so the same file runs against older code and shows the loss there.
 // Temp folders are made under the real path of the temp folder: behind a symlink (/var on macOS) git and
 // Regatta spell the same folder two ways and the loss does not fire, which would make these tests pass for
@@ -81,7 +81,7 @@ function expectCopyStillWorks(copy: string, repo: string, branch: string): void 
   expect(branchThere(repo, branch)).toBe(true)
 }
 
-describe('Empty trash never loses work (audit 2026-10-26 w-regatta-01, trash-4 review finding 1)', { timeout: 60000 }, () => {
+describe('Empty trash never loses work', { timeout: 60000 }, () => {
   it('path 1: a commit an agent made inside a submodule initialised in the lane still exists after Empty trash', async () => {
     const base = temp('regatta-loss-sm-')
     const sub = join(base, 'sub')
