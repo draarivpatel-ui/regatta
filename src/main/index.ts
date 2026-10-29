@@ -714,7 +714,7 @@ else app.whenReady().then(async () => {
     // First the engines stop starting new work (a check begun now would outlive the app). Then their
     // agents and checks, which run in their own process groups, are stopped (SIGTERM, then SIGKILL after
     // 2 seconds), and the app quits once they are gone, or after 6 seconds at most.
-    const closing = Promise.allSettled([heats, night, flows, spotfix, chat].map((engine) => quitEngine(engine)))
+    const closing = Promise.allSettled([heats, night, flows, spotfix, chat, video].map((engine) => quitEngine(engine)))
     const settled = Promise.all([closing, stopAllGroups(2000).catch(() => null)])
     const limit = new Promise((done) => setTimeout(done, 6000))
     void Promise.race([settled, limit]).finally(() => {

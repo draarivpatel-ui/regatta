@@ -781,6 +781,19 @@ describe('busy and stop', () => {
     expect(readdirSync(join(h.folderOf(video.id), 'renders'))).toEqual([])
   })
 
+  it('stops a running render on quit and waits for its process to end (sol-loop S9)', async () => {
+    const h = startVideo()
+    const video = h.engine.create(newVideo)
+    await h.engine.build(video.id)
+    h.ctl.hangRender = true
+    const rendering = h.engine.render(video.id)
+    await settle()
+    await h.engine.quit()
+    const after = await rendering
+    expect(at(after.renders, 0).status).toBe('stopped')
+    expect(readdirSync(join(h.folderOf(video.id), 'renders'))).toEqual([])
+  })
+
   it('does nothing when there is nothing to stop', () => {
     const h = startVideo()
     const video = h.engine.create(newVideo)

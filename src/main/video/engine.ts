@@ -64,6 +64,8 @@ interface VideoState {
 interface Op {
   stop: () => void
   stopped: boolean
+  /** Settles when the render process has ended (renders and checks only). */
+  ended?: Promise<unknown>
 }
 
 /** How a run of the render process ended. */
@@ -359,6 +361,13 @@ export class VideoEngine {
     this.ops.get(id)?.stop()
   }
 
+  /** On quit: stops every turn and render, and waits until each render process has ended. */
+  async quit(): Promise<void> {
+    const running = [...this.ops.values()]
+    for (const op of running) op.stop()
+    await Promise.allSettled(running.map((op) => op.ended))
+  }
+
   async render(id: string): Promise<VideoProject> {
     const state = this.stateOf(id)
     this.checkIdle(id)
@@ -454,6 +463,7 @@ export class VideoEngine {
       const jobFile = join(dir, 'job.json')
       writeFileSync(jobFile, JSON.stringify(job), 'utf8')
       const child = this.deps.spawnRender(jobFile)
+      op.ended = child.done
       op.stop = () => {
         op.stopped = true
         child.stop()
