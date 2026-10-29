@@ -1,5 +1,6 @@
 // Git helpers for heats: worktrees under one folder, lane commits, live diffs, merges.
 // Every command is an argument list for execFile, never a shell string, and always has a timeout.
+// Package: heats-engine .
 
 import { execFile, execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
@@ -829,13 +830,38 @@ export async function deleteOwnedBranch(
 }
 
 /**
+ * Keeps git out of submodules and nested repositories: their own config (a clean filter, a hook) is not
+ * Regatta's to run, and the sandbox flags only reach the repository git was started in. Used with
+ * `--ignore-submodules=all` on status and diff, and `gitlinkExcludes` on `git add -A`.
+ */
+const NO_SUBMODULE_RECURSE = ['-c', 'submodule.recurse=false', '-c', 'diff.ignoreSubmodules=all']
+
+/** `git diff` flags for a NUL-separated list of changed paths that never runs a user program or enters a submodule. */
+const DIFF_NAMES = ['--no-ext-diff', '--no-textconv', '--ignore-submodules=all', '--name-only', '-z']
+
+/**
+ * One `:(top,literal,exclude)<path>` pathspec per gitlink (submodule) in the index of `cwd` (or
+ * `env.GIT_INDEX_FILE`), so `git add -A` never looks inside a submodule's working tree.
+ */
+async function gitlinkExcludes(cwd: string, env?: Record<string, string>): Promise<string[]> {
+  const staged = await git(['ls-files', '--stage', '--full-name', '-z', '--', ':(top)'], cwd, env ? { env } : undefined)
+  const excludes: string[] = []
+  for (const entry of staged.split('\0')) {
+    if (!entry.startsWith('160000 ')) continue
+    const tab = entry.indexOf('\t')
+    if (tab !== -1) excludes.push(`:(top,literal,exclude)${entry.slice(tab + 1)}`)
+  }
+  return excludes
+}
+
+/**
  * True when tracked files in `cwd` differ from what is committed. Untracked files do not count.
  * Throws when git cannot say (a failed status is not a clean folder).
  */
 export async function dirtyTracked(cwd: string): Promise<boolean> {
   const out = await withScratchIndex(cwd, async (env) => {
     await tryGit(['update-index', '-q', '--really-refresh'], cwd, { env })
-    return git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=no'], cwd, { env })
+    return git(['--no-optional-locks', ...NO_SUBMODULE_RECURSE, 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all'], cwd, { env })
   })
   return out.trim().length > 0
 }
@@ -847,7 +873,7 @@ export async function dirtyTracked(cwd: string): Promise<boolean> {
 export async function hasChanges(cwd: string): Promise<boolean> {
   const out = await withScratchIndex(cwd, async (env) => {
     await tryGit(['update-index', '-q', '--really-refresh'], cwd, { env })
-    return git(['--no-optional-locks', 'status', '--porcelain'], cwd, { env })
+    return git(['--no-optional-locks', ...NO_SUBMODULE_RECURSE, 'status', '--porcelain', '--ignore-submodules=all'], cwd, { env })
   })
   return out.trim().length > 0
 }
@@ -934,14 +960,7 @@ export async function diffFrom(cwd: string, from: string, exclude: string[] = []
   const skip = await withModulesExcluded(cwd, exclude)
   const out = await withScratchIndex(cwd, async (env) => {
     await refreshIndex(cwd, env)
-    const staged = await git(['ls-files', '--stage', '--full-name', '-z', '--', ':(top)'], cwd, { env })
-    const subExcludes: string[] = []
-    for (const entry of staged.split('\0')) {
-      if (!entry.startsWith('160000 ')) continue
-      const tab = entry.indexOf('\t')
-      if (tab !== -1) subExcludes.push(`:(top,literal,exclude)${entry.slice(tab + 1)}`)
-    }
-    const addSkip = [...skip, ...subExcludes]
+    const addSkip = [...skip, ...(await gitlinkExcludes(cwd, env))]
     await git(['add', '-A', '--intent-to-add', ...(addSkip.length > 0 ? ['--', ...addSkip] : [])], cwd, { env })
     return git(['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=dirty', '--shortstat', from], cwd, { env })
   })
@@ -1007,9 +1026,10 @@ export async function commitAll(cwd: string, message: string, exclude: string[] 
   if (cleanDrivers.size > 0) {
     const usesCleanFilter = await withScratchIndex(cwd, async (env) => {
       await refreshIndex(cwd, env)
-      const preStaged = splitLines(await git(['diff', '--no-ext-diff', '--no-textconv', '--cached', '--name-only', '-z'], cwd, { env }), '\0')
-      await git(['add', '-A', ...(skip.length > 0 ? ['--', ...skip] : [])], cwd, { env })
-      const postStaged = splitLines(await git(['diff', '--no-ext-diff', '--no-textconv', '--cached', '--name-only', '-z'], cwd, { env }), '\0')
+      const preStaged = splitLines(await git([...NO_SUBMODULE_RECURSE, 'diff', ...DIFF_NAMES, '--cached'], cwd, { env }), '\0')
+      const addSkip = [...skip, ...(await gitlinkExcludes(cwd, env))]
+      await git([...NO_SUBMODULE_RECURSE, 'add', '-A', ...(addSkip.length > 0 ? ['--', ...addSkip] : [])], cwd, { env })
+      const postStaged = splitLines(await git([...NO_SUBMODULE_RECURSE, 'diff', ...DIFF_NAMES, '--cached'], cwd, { env }), '\0')
       const candidatePaths = [...new Set([...preStaged, ...postStaged])]
       return pathsUseCleanFilterDriver(cwd, candidatePaths, cleanDrivers)
     })
@@ -1030,26 +1050,29 @@ export async function commitAll(cwd: string, message: string, exclude: string[] 
   await refreshIndex(cwd)
   check()
   let committed = false
-  const staged = new Set(splitLines(await git(['diff', '--no-ext-diff', '--no-textconv', '--cached', '--name-only', '-z'], cwd), '\0'))
+  const staged = new Set(splitLines(await git([...NO_SUBMODULE_RECURSE, 'diff', ...DIFF_NAMES, '--cached'], cwd), '\0'))
   check()
   if (staged.size > 0) {
-    const changedAgain = splitLines(await git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z'], cwd), '\0').filter((path) => staged.has(path))
+    const changedAgain = splitLines(await git([...NO_SUBMODULE_RECURSE, 'diff', ...DIFF_NAMES], cwd), '\0').filter((path) => staged.has(path))
     check()
     if (changedAgain.length > 0) {
-      await git([...IDENTITY, 'commit', '--author', HEAT_AUTHOR, '-m', `${message} (staged changes)`], cwd)
+      await git([...IDENTITY, ...NO_SUBMODULE_RECURSE, 'commit', '--author', HEAT_AUTHOR, '-m', `${message} (staged changes)`], cwd)
       committed = true
       check()
     }
   }
-  await git(['add', '-A', ...(skip.length > 0 ? ['--', ...skip] : [])], cwd)
+  // A submodule's pointer is left out: recording it would mean looking inside the submodule's working tree.
+  const addSkip = [...skip, ...(await gitlinkExcludes(cwd))]
+  check()
+  await git([...NO_SUBMODULE_RECURSE, 'add', '-A', ...(addSkip.length > 0 ? ['--', ...addSkip] : [])], cwd)
   check()
   // What is staged now is what would be committed; an excluded, untracked path does not count.
-  if ((await git(['diff', '--no-ext-diff', '--no-textconv', '--cached', '--name-only'], cwd)).trim().length === 0) {
+  if ((await git([...NO_SUBMODULE_RECURSE, 'diff', ...DIFF_NAMES, '--cached'], cwd)).trim().length === 0) {
     check()
     return committed
   }
   check()
-  await git([...IDENTITY, 'commit', '--author', HEAT_AUTHOR, '-m', message], cwd)
+  await git([...IDENTITY, ...NO_SUBMODULE_RECURSE, 'commit', '--author', HEAT_AUTHOR, '-m', message], cwd)
   return true
 }
 
@@ -1288,13 +1311,20 @@ export async function provideModules(projectRoot: string, worktree: string, tmpD
 }
 
 import { closeSync, fsyncSync, openSync } from 'node:fs'
+import { ALTERED_TRASH_ENTRY, MOVED_OUT_TRASH_ENTRY, REATTACHED_TRASH_ENTRY, UNFINISHED_TRASH_ENTRY } from '../../shared/trash'
 
 export { processesInside }
 export const TRASH_DIR_NAME = '.regatta-trash'
 export const TRASH_LOCK_REASON = "In Regatta's trash"
 export const LOST_ENTRY_RECORD = "Regatta's record of this entry was lost"
-export const ALTERED_TRASH_ENTRY = 'altered, left alone'
-export const MOVED_OUT_TRASH_ENTRY = 'moved out of the trash; Regatta leaves it and its git records alone'
+/**
+ * The name Empty trash renames a worktree folder to inside its entry just before deleting what is in it. Only Regatta
+ * puts a folder there, so an entry holding it (and an `emptying` mark) was being emptied when it stopped: the next
+ * Empty trash finishes it, and a folder the user moves out of an entry is never mistaken for one Regatta deleted.
+ */
+const DELETING_FOLDER = '.regatta-deleting'
+// The listed states live in src/shared/trash.ts so Settings > Storage shows exactly these strings.
+export { ALTERED_TRASH_ENTRY, MOVED_OUT_TRASH_ENTRY, REATTACHED_TRASH_ENTRY, UNFINISHED_TRASH_ENTRY }
 
 /** A worktree an engine created, with what it needs to prove later that it is still the one it made. */
 export interface OwnedWorktree {
@@ -1345,6 +1375,17 @@ export interface TrashEntryMeta {
   repaired: boolean
   repairError?: string | null
   lastEmptyError?: string | null
+  /**
+   * When Empty trash started deleting this entry (written before its first deletion). An entry that still
+   * has it was interrupted, and the next Empty trash finishes it instead of taking it for one the user moved out.
+   */
+  emptying?: string | null
+  /**
+   * When Empty trash itself deleted the worktree folder (written right after the delete succeeded). Only an entry with
+   * both marks and nothing but `entry.json` left is finished as unfinished: a delete that failed leaves `emptying`
+   * alone, and a worktree the user then moved out of the entry is "moved out", git records untouched.
+   */
+  folderDeleted?: string | null
 }
 
 /** One trashed worktree entry as listed for Settings > Storage. */
@@ -1444,19 +1485,33 @@ export async function keepWorktreeHistory(
   // The worktree's own pseudo refs (ORIG_HEAD, every FETCH_HEAD entry, MERGE_HEAD...): reflog expiry and a reset
   // leave a commit remembered only there, and they go with the worktree's git folder.
   for (const ref of pseudoRefs(gitDir)) ids.push(...idsInPseudoRef(ref.text))
+  // A `rebase --autostash` in progress holds the user's uncommitted changes as a commit only a file names: keep it by a ref.
+  for (const folder of ['rebase-merge', 'rebase-apply']) {
+    try {
+      ids.push(...idsInPseudoRef(readFileSync(join(gitDir, folder, 'autostash'), 'utf8')))
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err
+    }
+  }
   return keepCommits(root, ids, name, `Kept commits of worktree ${basename(target)} before Regatta retired it`)
 }
 
 /**
- * Byte snapshot of the worktree-local git state (`HEAD`, pseudo refs, `logs/**`, and `refs/**`) inside
- * `<common dir>/worktrees/<id>`. Re-read immediately before `rmSync(trashPath)` and `rmSync(worktreeGitDir)`
- * with no git calls in between so any commit written after `keepWorktreeHistory` aborts deletion.
+ * Byte snapshot of the worktree-local git state (the names at its top level, `HEAD`, pseudo refs, `logs/**`
+ * and `refs/**`) inside `<common dir>/worktrees/<id>`. Re-read as the very last step before each deletion of
+ * Empty trash (the worktree folder, the entry folder, the git folder) so any commit written after
+ * `keepWorktreeHistory` stops it.
  */
 function worktreeGitStateSnapshot(gitDir: string): string | null {
   try {
     const st = lstatSync(gitDir)
     if (!st.isDirectory() || st.isSymbolicLink()) return null
-    const parts: string[] = []
+    // What the folder holds at its top level (name and kind), so a new entry such as `modules/` changes the stamp too.
+    const listing = readdirSync(gitDir, { withFileTypes: true })
+      .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : entry.isFile() ? '' : '@'}`)
+      .sort()
+    const parts: string[] = [`LIST:${listing.join('\0')}`]
     const headPath = join(gitDir, 'HEAD')
     try {
       const hStat = lstatSync(headPath)
@@ -1576,6 +1631,7 @@ function isValidTrashFolderName(name: string): boolean {
     name !== '..' &&
     name !== 'entry.json' &&
     name !== '.DS_Store' &&
+    name !== DELETING_FOLDER &&
     basename(name) === name &&
     !name.includes('/') &&
     !name.includes('\0')
@@ -1670,6 +1726,9 @@ export async function repairTrashedWorktree(entryDir: string, loadedMeta?: Trash
     if (!isRealSubdirectoryOf(entryDir, trashPath)) return fail(ALTERED_TRASH_ENTRY)
     const idGit = resolveIdentityGitFolder(meta.identity)
     if (!idGit) return fail('The worktree identity in entry.json does not resolve to a worktree git folder.')
+    // A copy the user restored (repaired elsewhere, or put back at the original path) uses the git folder now:
+    // repairing would take it back.
+    if (attachedElsewhere(idGit.gitDir, trashPath, meta.originalPath, meta.repaired === true)) return fail(REATTACHED_TRASH_ENTRY)
     const dotGitCheck = inspectTrashDotGit(trashPath, meta.originalPath, meta.identity)
     if (dotGitCheck.status !== 'matches') {
       return fail(dotGitCheck.status === 'missing' ? 'The trashed worktree has no .git entry.' : dotGitCheck.reason)
@@ -1794,6 +1853,8 @@ export async function trashOwnedWorktree(record: OwnedWorktree): Promise<Worktre
   }
 
   const folderName = basename(target)
+  // An entry is only ever trusted with a worktree folder of a name it can hold (never `entry.json` or `.regatta-deleting`).
+  if (!isValidTrashFolderName(folderName)) return { ...keep(`${path} was kept: Regatta's trash cannot hold a folder named ${folderName}.`), keepRef }
   let entryDir: string
   try {
     entryDir = mkdtempSync(join(trash, `${folderName}-`))
@@ -1980,7 +2041,9 @@ function inspectEntryMetaFile(entryPath: string, expectedChildName?: string): Me
     movedAt: typeof raw.movedAt === 'string' ? raw.movedAt : new Date(0).toISOString(),
     repaired: Boolean(raw.repaired),
     ...(typeof raw.repairError === 'string' ? { repairError: raw.repairError } : {}),
-    ...(typeof raw.lastEmptyError === 'string' ? { lastEmptyError: raw.lastEmptyError } : {})
+    ...(typeof raw.lastEmptyError === 'string' ? { lastEmptyError: raw.lastEmptyError } : {}),
+    ...(typeof raw.emptying === 'string' ? { emptying: raw.emptying } : {}),
+    ...(typeof raw.folderDeleted === 'string' ? { folderDeleted: raw.folderDeleted } : {})
   }
   const base = basename(meta.originalPath)
   if (!isValidTrashFolderName(base)) return { kind: 'altered', rawMeta: meta }
@@ -2087,6 +2150,15 @@ function describeProcessesInside(users: readonly { pid: number }[]): string[] {
   })
 }
 
+/** The programs using something inside `entryPath`, for the Storage list. */
+async function inUseInside(entryPath: string): Promise<string[]> {
+  try {
+    return describeProcessesInside(await processesInside(entryPath, isCaseInsensitive(entryPath)))
+  } catch {
+    return ['unknown (could not check running programs)']
+  }
+}
+
 function isMovedOutEntry(meta: TrashEntryMeta | null): boolean {
   if (!meta) return false
   if (meta.repaired || Boolean(meta.repairError)) return true
@@ -2157,10 +2229,36 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
     const significant = children.filter((child) => child !== '.DS_Store').sort()
     const nonMeta = significant.filter((child) => child !== 'entry.json')
 
-    if (nonMeta.length === 0) {
+    // An Empty trash that stopped while deleting the worktree folder leaves it renamed to `.regatta-deleting`.
+    const deletingLeft = nonMeta.length === 1 && nonMeta[0] === DELETING_FOLDER && isRealSubdirectoryOf(entryPath, join(entryPath, DELETING_FOLDER))
+    if (nonMeta.length === 0 || deletingLeft) {
       const metaCheck = inspectEntryMetaFile(entryPath)
       const meta = metaCheck.kind === 'valid' ? metaCheck.meta : metaCheck.kind === 'altered' ? metaCheck.rawMeta : null
-      if (isMovedOutEntry(meta) && meta) {
+      const unfinished = metaCheck.kind === 'valid' ? unfinishedGitFolder(entryPath, metaCheck.meta, deletingLeft) : null
+      if (unfinished && meta) {
+        // An Empty trash deleted the worktree folder and was interrupted: the next one finishes it.
+        const emptyError = emptyErrors?.get(entryPath) ?? lastEmptyTrashErrors.get(entryPath) ?? meta.lastEmptyError ?? null
+        out.push({
+          entryId: name,
+          entryPath,
+          trashPath: join(entryPath, basename(meta.originalPath)),
+          originalPath: meta.originalPath,
+          root: unfinished.root,
+          branch: meta.branch,
+          identity: meta.identity,
+          keepRef: meta.keepRef,
+          movedAt: meta.movedAt,
+          bytes: await measureDuBytes(entryPath),
+          inUse: await inUseInside(entryPath),
+          changedSinceMoved: 'unknown',
+          repaired: meta.repaired,
+          note: UNFINISHED_TRASH_ENTRY,
+          repairError: UNFINISHED_TRASH_ENTRY,
+          ...(emptyError ? { emptyError, lastEmptyError: emptyError } : {})
+        })
+        continue
+      }
+      if (!deletingLeft && isMovedOutEntry(meta) && meta) {
         const idGit = resolveIdentityGitFolder(meta.identity)
         const emptyError = emptyErrors?.get(entryPath) ?? lastEmptyTrashErrors.get(entryPath) ?? meta.lastEmptyError ?? null
         out.push({
@@ -2183,7 +2281,7 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
         })
         continue
       }
-      if (metaCheck.kind === 'altered') {
+      if (metaCheck.kind === 'altered' || deletingLeft) {
         out.push({
           entryId: name,
           entryPath,
@@ -2245,13 +2343,46 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
 
     let meta = metaCheck.kind === 'valid' ? metaCheck.meta : null
     const trashPath = candidateTrashPath
+    const recovered = meta ? null : recoverLostTrashEntry(trashPath, realDir)
 
-    if (meta && !meta.repaired) {
+    // A copy the user restored uses the git folder now: never repaired, never emptied. With entry.json lost, the
+    // original path is taken to be the worktrees folder's own `<name>`, as recoverLostTrashEntry does.
+    const ownIdGit = meta ? resolveIdentityGitFolder(meta.identity) : null
+    const ownGitDir = ownIdGit?.gitDir ?? recovered?.gitDir ?? null
+    const usedFrom = ownGitDir ? attachedElsewhere(ownGitDir, trashPath, meta?.originalPath ?? join(realDir, childName), meta?.repaired === true) : null
+    if (usedFrom) {
+      const reattachedRoot = ownIdGit?.root ?? recovered?.root ?? meta?.root ?? ''
+      // Nothing at the path git names: say so, with the one command that gives the entry back to the trash.
+      const hint = pathStillThere(usedFrom) ? null : reattachedText(usedFrom, reattachedRoot, trashPath)
+      const emptyError = emptyErrors?.get(entryPath) ?? lastEmptyTrashErrors.get(entryPath) ?? meta?.lastEmptyError ?? hint
+      out.push({
+        entryId: name,
+        entryPath,
+        trashPath,
+        originalPath: meta?.originalPath ?? trashPath,
+        root: ownIdGit?.root ?? recovered?.root ?? meta?.root ?? '',
+        branch: meta ? meta.branch : (recovered?.branch ?? null),
+        identity: meta?.identity ?? null,
+        keepRef: meta?.keepRef ?? '',
+        movedAt: meta?.movedAt ?? '',
+        bytes: await measureDuBytes(trashPath),
+        inUse: await inUseInside(entryPath),
+        changedSinceMoved: 'unknown',
+        repaired: false,
+        note: REATTACHED_TRASH_ENTRY,
+        repairError: REATTACHED_TRASH_ENTRY,
+        ...(emptyError ? { emptyError, lastEmptyError: emptyError } : {})
+      })
+      continue
+    }
+
+    // An entry an interrupted Empty trash started on is finished by the next one, never repaired.
+    const unfinished = Boolean(meta?.emptying)
+    if (meta && !meta.repaired && !unfinished) {
       meta = await repairTrashedWorktree(entryPath, meta)
     }
 
     const idGit = meta ? resolveIdentityGitFolder(meta.identity) : null
-    const recovered = meta ? null : recoverLostTrashEntry(trashPath, realDir)
     if (!meta && recovered) {
       try {
         const expectedDotGit = join(realpathSync(trashPath), '.git')
@@ -2264,18 +2395,19 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
     }
 
     const bytes = await measureDuBytes(trashPath)
-    let inUse: string[] = []
+    const inUse = await inUseInside(entryPath)
+    // A volume mounted inside is not part of the worktree: Empty trash skips the entry until it is ejected.
     try {
-      const users = await processesInside(entryPath, isCaseInsensitive(entryPath))
-      inUse = describeProcessesInside(users)
+      const mounted = foreignVolumeInside(trashPath, lstatSync(entryPath).dev, MAX_TRASH_SCAN_ENTRIES)
+      if (mounted) inUse.push(`a volume mounted at ${mounted} (eject it first)`)
     } catch {
-      inUse = ['unknown (could not check running programs)']
+      // The entry went away while listing; Empty trash checks again.
     }
 
     const movedAt = meta?.movedAt ?? ''
     const changedSinceMoved = meta ? checkChangedSinceMoved(trashPath, movedAt) : 'unknown'
     const emptyError = emptyErrors?.get(entryPath) ?? lastEmptyTrashErrors.get(entryPath) ?? meta?.lastEmptyError ?? null
-    const repairError = meta ? meta.repairError : LOST_ENTRY_RECORD
+    const repairError = unfinished ? UNFINISHED_TRASH_ENTRY : meta ? meta.repairError : LOST_ENTRY_RECORD
 
     out.push({
       entryId: name,
@@ -2291,7 +2423,7 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
       inUse,
       changedSinceMoved,
       repaired: meta?.repaired ?? false,
-      ...(meta ? {} : { note: LOST_ENTRY_RECORD }),
+      ...(meta ? (unfinished ? { note: UNFINISHED_TRASH_ENTRY } : {}) : { note: LOST_ENTRY_RECORD }),
       ...(repairError ? { repairError } : {}),
       ...(emptyError ? { emptyError, lastEmptyError: emptyError } : {})
     })
@@ -2300,16 +2432,17 @@ export async function listTrash(worktreesDir: string, emptyErrors?: ReadonlyMap<
 }
 
 /**
- * Updates an existing keep ref so it also reaches every commit in `latestKeepRef`, with `latestKeepRef^1`
- * as the first parent. Used when emptying the trash so `meta.keepRef` includes commits made inside
+ * Updates an existing keep ref so it also reaches every commit in `latestKeepRef`, with `firstParent` (or
+ * `latestKeepRef^1`) as the first parent, so `<existingRef>^1` is always the work to restore. Used when emptying the trash so `meta.keepRef` includes commits made inside
  * the trashed worktree after it was moved.
  */
-async function chainKeepRef(root: string, existingRef: string, latestKeepRef: string, folderName: string): Promise<void> {
+async function chainKeepRef(root: string, existingRef: string, latestKeepRef: string, folderName: string, firstParent?: string): Promise<void> {
   if (!existingRef || existingRef === latestKeepRef || !existingRef.startsWith(PARKED_PREFIX)) return
   try {
     const oldKeep = (await tryGit(['rev-parse', '--verify', '-q', existingRef], root))?.trim()
     const newKeep = (await tryGit(['rev-parse', '--verify', '-q', latestKeepRef], root))?.trim()
-    const newTip = (await tryGit(['rev-parse', '--verify', '-q', `${latestKeepRef}^1`], root))?.trim()
+    // The work to restore stays first: the worktree's HEAD when the caller names it, else the new keep's own first parent.
+    const newTip = firstParent ?? (await tryGit(['rev-parse', '--verify', '-q', `${latestKeepRef}^1`], root))?.trim()
     if (!oldKeep || !newKeep || !newTip || oldKeep === newKeep) return
     const tree = (await git(['hash-object', '-w', '-t', 'tree', '/dev/null'], root)).trim()
     const chained = (
@@ -2354,6 +2487,277 @@ function verifyWorktreeGitFolderBeforeDeleteSync(
   }
 }
 
+function realOrResolved(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
+/** Where `<gitDir>/gitdir` says the worktree's `.git` is now, resolved as git does (against the git folder); null when unreadable. */
+function recordedDotGitOf(gitDir: string): string | null {
+  try {
+    const realGitDir = realpathSync(gitDir)
+    const file = join(realGitDir, 'gitdir')
+    const st = lstatSync(file)
+    if (!st.isFile() || st.isSymbolicLink()) return null
+    const recorded = readFileSync(file, 'utf8').trim()
+    if (!recorded) return null
+    return isAbsolute(recorded) ? resolve(recorded) : resolve(realGitDir, recorded)
+  } catch {
+    return null
+  }
+}
+
+/** `path` made absolute with its deepest existing ancestor resolved through links, so a missing path compares like an existing one. */
+function canonicalPath(path: string): string {
+  let current = resolve(path)
+  const rest: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...rest)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      rest.unshift(basename(current))
+      current = parent
+    }
+  }
+}
+
+/** True when `<folder>/.git` is a regular file whose `gitdir:` line (a relative one read against `folder`, as git does) names `gitDir`. */
+function dotGitFileNames(folder: string, gitDir: string): boolean {
+  try {
+    const dotGit = join(folder, '.git')
+    const st = lstatSync(dotGit)
+    if (!st.isFile() || st.isSymbolicLink()) return false
+    const written = readFileSync(dotGit, 'utf8').trim().match(/^gitdir:\s*(.+)$/)?.[1]?.trim()
+    if (!written) return false
+    return realpathSync(isAbsolute(written) ? written : resolve(folder, written)) === realpathSync(gitDir)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Where the worktree's git folder is used from now, when that is not this entry (`ownFolder` is its `<entry>/<name>`):
+ * that worktree is the user's (safety.md mechanism 2, "A worktree the user re-attached is theirs"). Null only when the
+ * git folder is still the entry's own: its `gitdir` names a path inside the entry, or, for an entry Regatta never
+ * repaired (`repairVerified` false), `<originalPath>/.git` while nothing exists at the original path. Once Regatta has
+ * seen `gitdir` name the entry (`repaired: true` in entry.json, set by a verified repair or when Empty trash writes a
+ * lost entry.json again from a `gitdir` naming the entry, and never cleared, because repair is retried only for
+ * entries that are not repaired), a `gitdir` naming the original path
+ * can only have been written by the user re-attaching a copy there, so it is theirs even while nothing is at that
+ * path (a copy renamed away during Empty trash). Everything else is the user's:
+ * - a folder at the original path whose `.git` file names this git folder, repaired or not (git works in a plain copy);
+ * - a `gitdir` naming any other path, whether or not anything is there at this moment (a copy renamed away for a
+ *   moment, or on a volume that is not mounted, is still theirs).
+ * An unreadable `gitdir` is not an attachment; deleting the git folder separately requires it to name this entry.
+ */
+function attachedElsewhere(gitDir: string, ownFolder: string, originalPath: string | null, repairVerified: boolean): string | null {
+  if (originalPath && dotGitFileNames(originalPath, gitDir)) return originalPath
+  const dotGit = recordedDotGitOf(gitDir)
+  if (!dotGit) return null
+  const recorded = canonicalPath(dotGit)
+  if (recorded.startsWith(canonicalPath(dirname(ownFolder)) + sep)) return null
+  if (originalPath && !repairVerified && !pathStillThere(originalPath) && recorded === join(canonicalPath(originalPath), '.git')) return null
+  return dirname(dotGit)
+}
+
+/**
+ * The `.git` paths that count as this entry's own: `<entry>/<name>/.git`, and, for an entry Regatta never repaired
+ * (`repairVerified` false, see `attachedElsewhere`), `<originalPath>/.git` only while nothing exists at the original
+ * path (read now, as late as possible).
+ */
+function entryDotGitTargets(ownFolder: string, originalPath: string | null, repairVerified: boolean): string[] {
+  const targets = [join(realOrResolved(ownFolder), '.git')]
+  if (originalPath && !repairVerified && !pathStillThere(originalPath)) {
+    const original = resolve(originalPath)
+    targets.push(join(original, '.git'))
+    try {
+      targets.push(join(realpathSync(dirname(original)), basename(original), '.git'))
+    } catch {
+      // Its parent is gone too; the plain path is enough.
+    }
+  }
+  return [...new Set(targets)]
+}
+
+/** What Empty trash and the listing say about a volume mounted inside an entry. */
+function mountedInsideText(path: string): string {
+  return `a volume is mounted at ${path} inside it; eject it first`
+}
+
+/**
+ * The first folder inside `root` (or `root` itself) that is on another device than `baseDev`: a volume mounted
+ * there. Never follows links. Null when there is none, or when `limit` folders and files were looked at first
+ * (the delete itself never enters another device either; see `removeOnOneVolume`).
+ */
+function foreignVolumeInside(root: string, baseDev: number, limit = Number.POSITIVE_INFINITY): string | null {
+  const stack = [root]
+  let seen = 0
+  while (stack.length > 0) {
+    const dir = stack.pop()!
+    let st: ReturnType<typeof lstatSync>
+    try {
+      st = lstatSync(dir)
+    } catch {
+      continue
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) continue
+    if (st.dev !== baseDev) return dir
+    let names: string[]
+    try {
+      names = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (++seen > limit) return null
+      const full = join(dir, name)
+      try {
+        const child = lstatSync(full)
+        if (child.isDirectory() && !child.isSymbolicLink()) stack.push(full)
+      } catch {
+        // Gone or unreadable: nothing on another device to find there.
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * Deletes everything inside `root` (and `root` itself unless `keepRoot`), never entering a folder on another device
+ * than `baseDev`: a volume mounted inside (a disk image, an sshfs, rclone or network share) is not part of it, and
+ * Node's recursive `rmSync` has no one-file-system mode. It throws, naming the mount, before it enters such a folder.
+ * Files and links go with `rmSync` one at a time (a link is removed, never followed), folders with `rmdirSync`.
+ */
+function removeOnOneVolume(root: string, baseDev: number, keepRoot = false): void {
+  const removeDir = (dir: string, isRoot: boolean): void => {
+    const st = lstatSync(dir)
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error(`${dir} is not a real folder`)
+    if (st.dev !== baseDev) throw new Error(mountedInsideText(dir))
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name)
+      const child = lstatSync(full)
+      if (child.isDirectory() && !child.isSymbolicLink()) removeDir(full, false)
+      else rmSync(full, { force: false })
+    }
+    if (!isRoot || !keepRoot) rmdirSync(dir)
+  }
+  removeDir(root, true)
+}
+
+/** `path` in single quotes for a shell command shown to the user. */
+function shellQuoted(path: string): string {
+  return `'${path.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Why an entry is left alone when `usedFrom` uses its git folder. When nothing is at that path now, says so and
+ * how to give the entry back to the trash: git's own `worktree prune` cannot, because the trash lock keeps the record.
+ */
+function reattachedText(usedFrom: string, root: string, trashPath: string): string {
+  if (pathStillThere(usedFrom)) return `${REATTACHED_TRASH_ENTRY} (git now uses ${usedFrom})`
+  return (
+    `${REATTACHED_TRASH_ENTRY} (git now uses ${usedFrom}, which does not exist now; if that copy is gone for good, run ` +
+    `git -C ${shellQuoted(root)} worktree repair ${shellQuoted(trashPath)} to give it back to the trash, then Empty trash)`
+  )
+}
+
+/**
+ * The entries of a worktree's git folder Regatta knows (safety.md mechanism 2): everything else may hold work
+ * no keep commit can hold (a submodule's whole repository under `modules/`, `rebase --autostash` under
+ * `rebase-merge/`), so the folder is then kept. `COMMIT_EDITMSG` is the message of a commit already made.
+ */
+const KNOWN_GIT_FOLDER_FILES = new Set([
+  'HEAD',
+  'ORIG_HEAD',
+  'FETCH_HEAD',
+  'MERGE_HEAD',
+  'CHERRY_PICK_HEAD',
+  'REVERT_HEAD',
+  'REBASE_HEAD',
+  'BISECT_HEAD',
+  'AUTO_MERGE',
+  'COMMIT_EDITMSG',
+  'index',
+  'commondir',
+  'gitdir',
+  'locked',
+  'config.worktree'
+])
+/** The folders below `refs/` of a worktree's git folder that `keepWorktreeHistory` reads in full. */
+const KNOWN_WORKTREE_REF_FOLDERS = new Set(['worktree', 'bisect', 'rewritten'])
+
+/** True when `dir` holds only regular files and real folders, all the way down. */
+function onlyFilesAndFolders(dir: string): boolean {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (!onlyFilesAndFolders(join(dir, entry.name))) return false
+    } else if (!entry.isFile()) {
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * What a worktree's git folder holds that is not on the known list, as names relative to it (a folder ends
+ * in `/`). Empty when Regatta knows everything in it. A folder that cannot be read counts as unknown.
+ */
+function unknownGitFolderEntries(gitDir: string): string[] {
+  try {
+    const unknown: string[] = []
+    for (const entry of readdirSync(gitDir, { withFileTypes: true })) {
+      const full = join(gitDir, entry.name)
+      if (KNOWN_GIT_FOLDER_FILES.has(entry.name)) {
+        if (!entry.isFile()) unknown.push(entry.name)
+      } else if (entry.name === 'logs') {
+        if (!entry.isDirectory() || !onlyFilesAndFolders(full)) unknown.push('logs/')
+      } else if (entry.name === 'refs' && entry.isDirectory()) {
+        for (const ref of readdirSync(full, { withFileTypes: true })) {
+          if (!KNOWN_WORKTREE_REF_FOLDERS.has(ref.name) || !ref.isDirectory() || !onlyFilesAndFolders(join(full, ref.name))) {
+            unknown.push(`refs/${ref.name}${ref.isDirectory() ? '/' : ''}`)
+          }
+        }
+      } else {
+        unknown.push(entry.isDirectory() ? `${entry.name}/` : entry.name)
+      }
+    }
+    return unknown.sort()
+  } catch (err) {
+    return [`(the folder could not be read: ${errorText(err)})`]
+  }
+}
+
+/**
+ * For an entry holding only `entry.json`, or `entry.json` and `.regatta-deleting` (`deleting`): the git folder that an
+ * interrupted Empty trash left behind, when `entry.json` says emptying started and that Empty trash itself deleted the
+ * worktree folder (`folderDeleted`) or had renamed it to `.regatta-deleting` to delete it, and that git folder still
+ * points to this entry (and nowhere else). Null otherwise (a worktree the user moved out, also after a delete that
+ * failed, or an orphan from a crash before the move).
+ */
+function unfinishedGitFolder(entryPath: string, meta: TrashEntryMeta | null, deleting = false): ResolvedIdentityGit | null {
+  // Only an entry whose worktree folder Empty trash itself deleted or was deleting: after a failed delete the folder is
+  // back under its own name, and the user may have moved it out.
+  if (!meta?.emptying || !(meta.folderDeleted || deleting)) return null
+  const childName = basename(meta.originalPath)
+  if (!isValidTrashFolderName(childName)) return null
+  const idGit = resolveIdentityGitFolder(meta.identity)
+  if (!idGit) return null
+  const own = join(entryPath, childName)
+  if (attachedElsewhere(idGit.gitDir, own, meta.originalPath, meta.repaired === true)) return null
+  const dotGit = recordedDotGitOf(idGit.gitDir)
+  return dotGit && entryDotGitTargets(own, meta.originalPath, meta.repaired === true).includes(dotGit) ? idGit : null
+}
+
+function writeEntryMeta(entryPath: string, meta: TrashEntryMeta): void {
+  writeAndFsyncFile(join(entryPath, 'entry.json'), JSON.stringify(meta, null, 2), 0o600)
+  tryFsyncDir(entryPath)
+}
+
 function recordEmptyError(entryPath: string, meta: TrashEntryMeta | null, msg: string, errors: Map<string, string>): void {
   errors.set(entryPath, msg)
   lastEmptyTrashErrors.set(entryPath, msg)
@@ -2370,13 +2774,25 @@ function recordEmptyError(entryPath: string, meta: TrashEntryMeta | null, msg: s
 /**
  * Empties `<worktreesDir>/.regatta-trash`.
  *
- * For each entry:
- * 1. Validate the entry folder structure (`entry.json` + one real worktree subfolder matching `basename(meta.originalPath)`); skip altered or moved-out entries.
+ * For each entry, one at a time (a failure on one is reported and the next goes on):
+ * 1. Validate the entry folder (`entry.json` and one real worktree subfolder named `basename(meta.originalPath)`);
+ *    skip altered or moved-out entries. An entry an interrupted Empty trash left (its `emptying` mark is set, it holds
+ *    a `.regatta-deleting` folder or only `entry.json` with `folderDeleted`, and its git folder still points to it)
+ *    is finished.
  * 2. Skip it if in use (`processesInside`), naming the program.
- * 3. Resolve the git folder and repository from `meta.identity` (or recover from `<trashPath>/.git` and `<gitDir>/commondir` when `entry.json` was lost).
- * 4. Snapshot the worktree git folder state, run `keepWorktreeHistory` directly against `<gitDir>`, chain only `meta.keepRef`, and read the branch tip.
- * 5. Verify `<common dir>/worktrees/<id>/gitdir` and re-check the byte snapshot immediately before `rmSync(trashPath)` and `rmSync(worktreeGitDir)`.
- * 6. Delete `<common dir>/worktrees/<id>` when verified, and delete the owned branch (only `regatta/*` branches when `entry.json` was lost).
+ * 3. Resolve the git folder and repository from `meta.identity` (or from `<trashPath>/.git` and `<gitDir>/commondir`
+ *    when `entry.json` was lost). Skip it, touching nothing in git, when that git folder is used from anywhere but this
+ *    entry (`attachedElsewhere`: a copy the user restored, repaired or not, even one missing for a moment).
+ * 4. Snapshot the worktree git folder, keep its commits (`keepWorktreeHistory`, chained into `meta.keepRef`), read
+ *    the branch tip, and mark `entry.json` as being emptied (`emptying`).
+ * 5. As the very last step before each deletion, re-read the snapshot and check that the entry (and the worktree
+ *    folder in it) is still the real folder it was, never a link, with no volume mounted inside: the worktree folder
+ *    (renamed to `.regatta-deleting` and deleted there, then `folderDeleted` is marked), then the entry folder (only
+ *    when it holds nothing but `entry.json`), then the git folder, which also must not be used from elsewhere, must
+ *    still point to this entry and hold nothing off the known list. Every delete stays on the entry's volume
+ *    (`removeOnOneVolume`). A git folder that is kept keeps its lock and the branch too, and the result says where it is.
+ * 6. Delete the owned branch (only `regatta/*` when `entry.json` was lost); the keep ref's first parent stays the
+ *    worktree's HEAD.
  */
 export async function emptyTrash(
   worktreesDir: string,
@@ -2425,64 +2841,79 @@ export async function emptyTrash(
     const significant = children.filter((child) => child !== '.DS_Store').sort()
     const nonMeta = significant.filter((child) => child !== 'entry.json')
 
-    if (nonMeta.length === 0) {
+    let meta: TrashEntryMeta | null
+    let childName: string
+    // Where the worktree folder is: in the entry under its own name, renamed to `.regatta-deleting` by an Empty trash
+    // that stopped while deleting it, or already gone (an interrupted Empty trash left only entry.json).
+    let folderState: 'present' | 'deleting' | 'gone'
+    const deletingLeft = nonMeta.length === 1 && nonMeta[0] === DELETING_FOLDER && isRealSubdirectoryOf(entryPath, join(entryPath, DELETING_FOLDER))
+    if (nonMeta.length === 0 || deletingLeft) {
       const metaCheck = inspectEntryMetaFile(entryPath)
-      const meta = metaCheck.kind === 'valid' ? metaCheck.meta : metaCheck.kind === 'altered' ? metaCheck.rawMeta : null
-      if (isMovedOutEntry(meta) && meta) {
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath: join(entryPath, isValidTrashFolderName(basename(meta.originalPath)) ? basename(meta.originalPath) : name),
-          originalPath: meta.originalPath,
-          branch: meta.branch,
-          status: 'skipped',
-          reason: MOVED_OUT_TRASH_ENTRY
-        })
+      const rawMeta = metaCheck.kind === 'valid' ? metaCheck.meta : metaCheck.kind === 'altered' ? metaCheck.rawMeta : null
+      if (metaCheck.kind === 'valid' && unfinishedGitFolder(entryPath, metaCheck.meta, deletingLeft)) {
+        meta = metaCheck.meta
+        childName = basename(meta.originalPath)
+        folderState = deletingLeft ? 'deleting' : 'gone'
+      } else {
+        if (!deletingLeft && isMovedOutEntry(rawMeta) && rawMeta) {
+          outcomes.push({
+            entryId: name,
+            entryPath,
+            trashPath: join(entryPath, isValidTrashFolderName(basename(rawMeta.originalPath)) ? basename(rawMeta.originalPath) : name),
+            originalPath: rawMeta.originalPath,
+            branch: rawMeta.branch,
+            status: 'skipped',
+            reason: MOVED_OUT_TRASH_ENTRY
+          })
+          continue
+        }
+        if (metaCheck.kind === 'altered' || deletingLeft) {
+          outcomes.push({
+            entryId: name,
+            entryPath,
+            trashPath: entryPath,
+            originalPath: entryPath,
+            branch: rawMeta?.branch ?? null,
+            status: 'skipped',
+            reason: ALTERED_TRASH_ENTRY
+          })
+          continue
+        }
+        cleanupOrphanEntryDir(entryPath)
         continue
       }
-      if (metaCheck.kind === 'altered') {
+    } else {
+      childName = nonMeta[0]!
+      const candidateTrashPath = join(entryPath, childName)
+      const metaCheck = inspectEntryMetaFile(entryPath, nonMeta.length === 1 ? childName : undefined)
+      const isStructurallyValid =
+        nonMeta.length === 1 &&
+        isValidTrashFolderName(childName) &&
+        isRealSubdirectoryOf(entryPath, candidateTrashPath) &&
+        metaCheck.kind !== 'altered'
+
+      if (!isStructurallyValid) {
+        const rawMeta = metaCheck.kind === 'valid' ? metaCheck.meta : metaCheck.kind === 'altered' ? metaCheck.rawMeta : null
+        const safeOriginal =
+          rawMeta && isValidTrashFolderName(basename(rawMeta.originalPath)) ? rawMeta.originalPath : candidateTrashPath
         outcomes.push({
           entryId: name,
           entryPath,
-          trashPath: entryPath,
-          originalPath: entryPath,
-          branch: meta?.branch ?? null,
+          trashPath: isValidTrashFolderName(childName) ? candidateTrashPath : entryPath,
+          originalPath: safeOriginal,
+          branch: rawMeta?.branch ?? null,
           status: 'skipped',
           reason: ALTERED_TRASH_ENTRY
         })
         continue
       }
-      cleanupOrphanEntryDir(entryPath)
-      continue
+      meta = metaCheck.kind === 'valid' ? metaCheck.meta : null
+      folderState = 'present'
     }
 
-    const childName = nonMeta[0]!
-    const candidateTrashPath = join(entryPath, childName)
-    const metaCheck = inspectEntryMetaFile(entryPath, nonMeta.length === 1 ? childName : undefined)
-    const isStructurallyValid =
-      nonMeta.length === 1 &&
-      isValidTrashFolderName(childName) &&
-      isRealSubdirectoryOf(entryPath, candidateTrashPath) &&
-      metaCheck.kind !== 'altered'
-
-    if (!isStructurallyValid) {
-      const rawMeta = metaCheck.kind === 'valid' ? metaCheck.meta : metaCheck.kind === 'altered' ? metaCheck.rawMeta : null
-      const safeOriginal =
-        rawMeta && isValidTrashFolderName(basename(rawMeta.originalPath)) ? rawMeta.originalPath : candidateTrashPath
-      outcomes.push({
-        entryId: name,
-        entryPath,
-        trashPath: isValidTrashFolderName(childName) ? candidateTrashPath : entryPath,
-        originalPath: safeOriginal,
-        branch: rawMeta?.branch ?? null,
-        status: 'skipped',
-        reason: ALTERED_TRASH_ENTRY
-      })
-      continue
-    }
-
-    let meta = metaCheck.kind === 'valid' ? metaCheck.meta : null
-    const trashPath = candidateTrashPath
+    const trashPath = join(entryPath, childName)
+    const deletingPath = join(entryPath, DELETING_FOLDER)
+    const folderPresent = folderState === 'present'
     const originalPath = meta?.originalPath ?? trashPath
 
     // 1. Check if in use before locking.
@@ -2523,7 +2954,9 @@ export async function emptyTrash(
 
     if (!entryRoot || !entryCommonDir || !worktreeGitDir) {
       const reason = meta
-        ? 'Skipped: the repository or worktree git folder for this entry is gone.'
+        ? 'Skipped: the repository or worktree git folder for this entry is gone, so git keeps nothing of it here. Unless ' +
+          'its repository is only on a volume that is not mounted now, the folder is plain files: look inside, and ' +
+          'delete it in Finder if you do not need them.'
         : 'Skipped: entry.json is missing or invalid and git could not find its repository.'
       recordEmptyError(entryPath, meta, reason, errors)
       outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: entryBranch, status: 'error', reason })
@@ -2531,74 +2964,94 @@ export async function emptyTrash(
     }
 
     const executeEntry = async (): Promise<void> => {
-      // Re-check structural validity and in-use inside the repository lock.
-      if (!isRealSubdirectoryOf(entryPath, trashPath)) {
-        outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: entryBranch, status: 'skipped', reason: ALTERED_TRASH_ENTRY })
+      const report = (status: EmptyTrashOutcome['status'], reason: string | null, branch = entryBranch): void => {
+        outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch, status, reason })
+      }
+      // Re-check the shape of the entry and whether it is in use, inside the repository lock.
+      const shapeHolds =
+        folderState === 'present'
+          ? isRealSubdirectoryOf(entryPath, trashPath)
+          : folderState === 'deleting'
+            ? isRealSubdirectoryOf(entryPath, deletingPath) && !pathStillThere(trashPath)
+            : !pathStillThere(trashPath) && !pathStillThere(deletingPath)
+      if (!shapeHolds) {
+        report('skipped', ALTERED_TRASH_ENTRY)
         return
       }
       try {
         const users = await processesInside(entryPath, isCaseInsensitive(entryPath))
         if (users.length > 0) {
-          const who = describeProcessesInside(users).join(', ')
-          outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: entryBranch, status: 'skipped', reason: `Skipped: in use by ${who}.` })
+          report('skipped', `Skipped: in use by ${describeProcessesInside(users).join(', ')}.`)
           return
         }
       } catch (err) {
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath,
-          originalPath,
-          branch: entryBranch,
-          status: 'skipped',
-          reason: `Skipped: Regatta could not tell whether a program is using it (${errorText(err)}).`
-        })
+        report('skipped', `Skipped: Regatta could not tell whether a program is using it (${errorText(err)}).`)
         return
       }
 
-      let realTrashPath: string
+      let realEntry: string
+      let ownFolder: string
+      // The device the entry is on: nothing on another one (a volume mounted inside) is ever entered or deleted.
+      let entryDev: number
       try {
-        realTrashPath = realpathSync(trashPath)
+        realEntry = realpathSync(entryPath)
+        ownFolder = join(realEntry, childName)
+        entryDev = lstatSync(realEntry).dev
       } catch (err) {
         const msg = errorText(err)
         recordEmptyError(entryPath, meta, msg, errors)
-        outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: entryBranch, status: 'error', reason: msg })
+        report('error', msg)
         return
       }
-      const expectedDotGit = join(realTrashPath, '.git')
-      const allowedDotGitTargets = meta ? [expectedDotGit, join(resolve(meta.originalPath), '.git')] : [expectedDotGit]
+      // Read as late as possible, and from the current `meta` (a repair earlier in this run, or the entry.json written
+      // again for a lost record, can set `repaired`): <originalPath>/.git counts as this entry's only for an entry
+      // Regatta never repaired, and only while nothing exists there.
+      const repairVerified = (): boolean => meta?.repaired === true
+      const dotGitTargets = (): string[] => entryDotGitTargets(ownFolder, meta ? meta.originalPath : null, repairVerified())
+      // With entry.json lost, the original path is taken to be the worktrees folder's own `<name>`.
+      const originalForCheck = meta ? meta.originalPath : join(realDir, childName)
+      // The entry is still the real folder it was when this started (never a link put in its place) and, with
+      // `folder`, that folder (the worktree folder, or `.regatta-deleting`) is still a real folder directly inside it.
+      // Asked right before every write into the entry and every delete, so nothing is written or deleted through a link.
+      const entryStillOurs = (folder: string | null): boolean => {
+        try {
+          const st = lstatSync(entryPath)
+          if (!st.isDirectory() || st.isSymbolicLink() || realpathSync(entryPath) !== realEntry) return false
+          return !folder || (isRealSubdirectoryOf(entryPath, folder) && realpathSync(folder) === join(realEntry, basename(folder)))
+        } catch {
+          return false
+        }
+      }
+      const recordError = (msg: string): void => recordEmptyError(entryPath, entryStillOurs(null) ? meta : null, msg, errors)
+      const reattached = (usedFrom: string): string => reattachedText(usedFrom, entryRoot, trashPath)
 
-      if (meta) {
+      // A copy the user restored uses the git folder now: nothing in git is touched.
+      const elsewhere = attachedElsewhere(worktreeGitDir, ownFolder, originalForCheck, repairVerified())
+      if (elsewhere) {
+        report('skipped', reattached(elsewhere))
+        return
+      }
+
+      if (!folderPresent) {
+        if (!verifyWorktreeGitFolderBeforeDeleteSync(entryCommonDir, worktreeGitDir, dotGitTargets())) {
+          report('skipped', 'Skipped: its git folder does not point to this entry any more.')
+          return
+        }
+      } else if (meta) {
         const dotGitCheck = inspectTrashDotGit(trashPath, meta.originalPath, meta.identity)
         if (dotGitCheck.status === 'invalid') {
-          outcomes.push({
-            entryId: name,
-            entryPath,
-            trashPath,
-            originalPath,
-            branch: entryBranch,
-            status: 'skipped',
-            reason: `Skipped: ${dotGitCheck.reason}`
-          })
+          report('skipped', `Skipped: ${dotGitCheck.reason}`)
           return
         }
         if (dotGitCheck.status === 'missing') {
-          if (!verifyWorktreeGitFolderBeforeDeleteSync(entryCommonDir, worktreeGitDir, allowedDotGitTargets)) {
-            outcomes.push({
-              entryId: name,
-              entryPath,
-              trashPath,
-              originalPath,
-              branch: entryBranch,
-              status: 'skipped',
-              reason: 'Skipped: the trashed worktree has no .git file and its git folder does not point to it.'
-            })
+          if (!verifyWorktreeGitFolderBeforeDeleteSync(entryCommonDir, worktreeGitDir, dotGitTargets())) {
+            report('skipped', 'Skipped: the trashed worktree has no .git file and its git folder does not point to it.')
             return
           }
-        } else if (!meta.repaired) {
+        } else if (!meta.repaired && !meta.emptying) {
           meta = await repairTrashedWorktree(entryPath, meta)
         }
-      } else if (recovered && recovered.recordedDotGit !== expectedDotGit) {
+      } else if (recovered && recovered.recordedDotGit !== join(ownFolder, '.git')) {
         try {
           hooksSandbox()
           await tryGit(['worktree', 'repair', trashPath], entryRoot)
@@ -2607,39 +3060,25 @@ export async function emptyTrash(
         }
       }
 
-      // 2. Snapshot worktree git state, run keepWorktreeHistory against worktreeGitDir, and read the branch tip.
+      // 2. Snapshot the worktree git state, keep its commits from the git folder, and read the branch tip.
       const baseName = basename(originalPath)
       const snapBefore = worktreeGitStateSnapshot(worktreeGitDir)
       if (snapBefore === null) {
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath,
-          originalPath,
-          branch: entryBranch,
-          status: 'skipped',
-          reason: 'Skipped: the worktree git folder could not be read.'
-        })
+        report('skipped', 'Skipped: the worktree git folder could not be read.')
         return
       }
 
       let latestKeepRef: string
+      let headTip: string | null = null
       try {
         hooksSandbox()
         latestKeepRef = await keepWorktreeHistory(entryRoot, trashPath, baseName, worktreeGitDir)
-        if (meta?.keepRef) {
-          await chainKeepRef(entryRoot, meta.keepRef, latestKeepRef, baseName)
-        }
+        // The worktree's HEAD (detached or not) is the keep commit's first parent: it stays first in every chain below.
+        headTip = (await tryGit(['rev-parse', '--verify', '-q', `${latestKeepRef}^1`], entryRoot))?.trim() || null
+        // keepCommits put the worktree's HEAD first in latestKeepRef, which chainKeepRef keeps first by itself.
+        if (meta?.keepRef) await chainKeepRef(entryRoot, meta.keepRef, latestKeepRef, baseName)
       } catch (err) {
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath,
-          originalPath,
-          branch: entryBranch,
-          status: 'skipped',
-          reason: `Skipped: a copy of its commits could not be made (${errorText(err)}).`
-        })
+        report('skipped', `Skipped: a copy of its commits could not be made (${errorText(err)}).`)
         return
       }
 
@@ -2653,88 +3092,208 @@ export async function emptyTrash(
         ? ((await tryGit(['rev-parse', '--verify', '--quiet', `refs/heads/${deletableBranch}`], entryRoot))?.trim() ?? null)
         : null
 
-      // 3. Verify <common dir>/worktrees/<id>/gitdir and re-check the byte snapshot immediately before deletion.
-      const verifiedGitDirToRemove = verifyWorktreeGitFolderBeforeDeleteSync(
-        entryCommonDir,
-        worktreeGitDir,
-        allowedDotGitTargets
-      )
-
-      if (worktreeGitStateSnapshot(worktreeGitDir) !== snapBefore) {
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath,
-          originalPath,
-          branch: activeBranch,
-          status: 'skipped',
-          reason: 'Skipped: the worktree git state changed while emptying trash; run Empty trash again so its new commits are kept.'
-        })
-        return
-      }
-
-      // 4. Delete the entry folder recursively (trashPath first so entry.json survives if deleting trashPath fails).
+      // 3. Mark entry.json before the first deletion, so an interruption from here on is finished by the next
+      //    Empty trash. A lost entry.json is written again from what the git folder says (branch only under regatta/).
+      const previousMeta = meta
+      let startedMeta: TrashEntryMeta
       try {
-        rmSync(trashPath, { recursive: true, force: false })
-        if (pathStillThere(trashPath)) throw new Error(`${trashPath} could not be completely removed.`)
-      } catch (err) {
-        const msg = errorText(err)
-        recordEmptyError(entryPath, meta, msg, errors)
-        outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: activeBranch, status: 'error', reason: msg })
-        return
-      }
-
-      // Re-check snapshot right before removing the worktree git folder; if a commit landed during rmSync(trashPath),
-      // recreate an empty trashPath placeholder so the next Empty trash run parks the new commit before deleting gitDir.
-      if (worktreeGitStateSnapshot(worktreeGitDir) !== snapBefore) {
-        try {
-          mkdirSync(trashPath, { recursive: true })
-        } catch {
-          // Best-effort placeholder folder.
+        const now = new Date().toISOString()
+        if (meta) {
+          startedMeta = { ...meta, emptying: now }
+        } else {
+          const st = lstatSync(worktreeGitDir)
+          startedMeta = {
+            version: 1,
+            originalPath: join(realDir, childName),
+            root: entryRoot,
+            branch: deletableBranch,
+            identity: `${worktreeGitDir}|i${st.ino}|${st.birthtimeMs}`,
+            keepRef: latestKeepRef,
+            movedAt: now,
+            repaired: recordedDotGitOf(worktreeGitDir) === join(ownFolder, '.git'),
+            emptying: now
+          }
         }
-        outcomes.push({
-          entryId: name,
-          entryPath,
-          trashPath,
-          originalPath,
-          branch: activeBranch,
-          status: 'skipped',
-          reason: 'Skipped: the worktree git state changed while emptying trash; run Empty trash again so its new commits are kept.'
-        })
+        if (!entryStillOurs(folderState === 'present' ? trashPath : folderState === 'deleting' ? deletingPath : null)) throw new Error('the entry folder is not the one Regatta made any more')
+        writeEntryMeta(entryPath, startedMeta)
+      } catch (err) {
+        report('skipped', `Skipped: Regatta could not record in entry.json that it started emptying it (${errorText(err)}).`)
         return
       }
+      meta = startedMeta
+      const keptGitFolder = (why: string): string =>
+        `Kept its git folder ${worktreeGitDir}${deletableBranch ? ` and branch ${deletableBranch}` : ''}: ${why}.`
 
+      // 4. The worktree folder. The last checks come right before it is renamed to `.regatta-deleting` (one rename(2)
+      //    inside the entry) and deleted there, with nothing in between. Only Regatta puts a folder at that name, so an
+      //    interruption from the rename on leaves an entry the next Empty trash finishes, never one that looks moved out.
+      if (folderState !== 'gone') {
+        const folderNow = folderState === 'present' ? trashPath : deletingPath
+        const elsewhereNow = attachedElsewhere(worktreeGitDir, ownFolder, originalForCheck, repairVerified())
+        const mounted = elsewhereNow ? null : foreignVolumeInside(folderNow, entryDev)
+        if (elsewhereNow || mounted || worktreeGitStateSnapshot(worktreeGitDir) !== snapBefore) {
+          // Nothing was deleted: drop the mark again, unless an earlier Empty trash had set it.
+          if (!previousMeta?.emptying && entryStillOurs(null)) {
+            const { emptying: _started, ...unmarked } = startedMeta
+            try {
+              writeEntryMeta(entryPath, unmarked)
+              meta = unmarked
+            } catch {
+              // The mark only makes the next Empty trash finish the entry; leaving it is harmless.
+            }
+          }
+          report(
+            'skipped',
+            elsewhereNow
+              ? reattached(elsewhereNow)
+              : mounted
+                ? `Skipped: ${mountedInsideText(mounted)}.`
+                : 'Skipped: the worktree git state changed while emptying trash; run Empty trash again so its new commits are kept.',
+            activeBranch
+          )
+          return
+        }
+        // Never through a link: the entry and the worktree folder must still be the real folders this started with.
+        if (!entryStillOurs(folderNow)) {
+          report('skipped', ALTERED_TRASH_ENTRY, activeBranch)
+          return
+        }
+        if (folderState === 'present') {
+          try {
+            renameSync(trashPath, deletingPath)
+            tryFsyncDir(entryPath)
+          } catch (err) {
+            // Nothing was deleted. The `emptying` mark stays, and a worktree the user now moves out of the entry is
+            // listed as moved out and left alone, git records included.
+            const msg = errorText(err)
+            recordError(msg)
+            report('error', msg, activeBranch)
+            return
+          }
+        }
+        try {
+          if (!entryStillOurs(deletingPath)) throw new Error('the entry folder is not the one Regatta made any more')
+          removeOnOneVolume(deletingPath, entryDev, true)
+        } catch (err) {
+          // Put what is left back under its own name, so a worktree the user then moves out of the entry is listed as
+          // moved out, its git records untouched. If that fails, `.regatta-deleting` stays and the next Empty trash
+          // finishes the entry.
+          if (folderState === 'present' && entryStillOurs(deletingPath) && !pathStillThere(trashPath)) {
+            try {
+              renameSync(deletingPath, trashPath)
+              tryFsyncDir(entryPath)
+            } catch {
+              // `.regatta-deleting` stays: the entry is unfinished, never moved out.
+            }
+          }
+          const msg = errorText(err)
+          recordError(msg)
+          report('error', msg, activeBranch)
+          return
+        }
+        // Regatta itself deleted the worktree folder: mark it, and only then remove the empty `.regatta-deleting`, so
+        // an entry is never left holding only entry.json without the mark.
+        try {
+          if (!entryStillOurs(deletingPath)) throw new Error('the entry folder is not the one Regatta made any more')
+          const deletedMeta: TrashEntryMeta = { ...startedMeta, folderDeleted: new Date().toISOString() }
+          writeEntryMeta(entryPath, deletedMeta)
+          meta = deletedMeta
+          rmdirSync(deletingPath)
+          tryFsyncDir(entryPath)
+        } catch (err) {
+          const msg = `${errorText(err)}. Run Empty trash again to finish this entry.`
+          recordError(msg)
+          report('error', msg, activeBranch)
+          return
+        }
+      }
+
+      // 5. The entry folder: the last check right before the delete. It must hold only entry.json now (and Finder's
+      //    .DS_Store); anything else in it stays, and so does the entry.
+      if (worktreeGitStateSnapshot(worktreeGitDir) !== snapBefore) {
+        // The entry stays, marked, so the next Empty trash keeps the new commits and finishes it.
+        report(
+          'skipped',
+          `Skipped: the worktree git state changed after its folder was deleted. ${keptGitFolder('its logs hold the new commits')} Run Empty trash again to finish this entry.`,
+          activeBranch
+        )
+        return
+      }
+      if (!entryStillOurs(null)) {
+        report('skipped', ALTERED_TRASH_ENTRY, activeBranch)
+        return
+      }
       try {
-        rmSync(entryPath, { recursive: true, force: false })
-        if (pathStillThere(entryPath)) throw new Error(`${entryPath} could not be completely removed.`)
+        const other = readdirSync(entryPath).filter((child) => child !== 'entry.json' && child !== '.DS_Store')
+        if (other.length > 0) {
+          report(
+            'skipped',
+            `Skipped: its entry folder now holds ${other.sort().join(', ')}, which Regatta did not put there, so the entry stays. ${keptGitFolder('the entry is not finished')} Run Empty trash again once you have looked inside.`,
+            activeBranch
+          )
+          return
+        }
+        for (const file of ['.DS_Store', 'entry.json']) {
+          try {
+            rmSync(join(entryPath, file), { force: false })
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+          }
+        }
+        rmdirSync(entryPath)
       } catch (err) {
         const msg = errorText(err)
-        recordEmptyError(entryPath, meta, msg, errors)
-        outcomes.push({ entryId: name, entryPath, trashPath, originalPath, branch: activeBranch, status: 'error', reason: msg })
+        recordError(msg)
+        report('error', msg, activeBranch)
         return
       }
       lastEmptyTrashErrors.delete(entryPath)
 
-      // 5. Delete <common dir>/worktrees/<id> only when its gitdir file matched.
-      if (verifiedGitDirToRemove) {
+      // 6. The git folder: deleted only when it still points to this entry and Regatta knows everything in it, and
+      //    its state is what was kept, re-read right before the delete. Otherwise it stays with its lock and the branch.
+      let gitFolderKept: string | null = null
+      const usedFrom = attachedElsewhere(worktreeGitDir, ownFolder, originalForCheck, repairVerified())
+      const verifiedGitDirToRemove = usedFrom ? null : verifyWorktreeGitFolderBeforeDeleteSync(entryCommonDir, worktreeGitDir, dotGitTargets())
+      const unknown = verifiedGitDirToRemove ? unknownGitFolderEntries(verifiedGitDirToRemove) : []
+      let gitFolderDev = 0
+      let mountedInGit: string | null = null
+      if (verifiedGitDirToRemove && unknown.length === 0) {
         try {
-          rmSync(verifiedGitDirToRemove, { recursive: true, force: false })
-        } catch {
-          // Leave the worktree git folder if removal failed.
+          gitFolderDev = lstatSync(dirname(verifiedGitDirToRemove)).dev
+          mountedInGit = foreignVolumeInside(verifiedGitDirToRemove, gitFolderDev)
+        } catch (err) {
+          mountedInGit = `(its folder could not be read: ${errorText(err)})`
+        }
+      }
+      if (usedFrom) {
+        gitFolderKept = keptGitFolder(`a worktree at ${usedFrom} uses it now`)
+      } else if (!verifiedGitDirToRemove) {
+        gitFolderKept = keptGitFolder('it does not point to this entry any more')
+      } else if (unknown.length > 0) {
+        gitFolderKept = keptGitFolder(`it holds ${unknown.join(', ')}, which Regatta does not know, so whatever is in it stays (look inside before removing it)`)
+      } else if (mountedInGit) {
+        gitFolderKept = keptGitFolder(mountedInsideText(mountedInGit))
+      } else if (worktreeGitStateSnapshot(worktreeGitDir) !== snapBefore) {
+        gitFolderKept = keptGitFolder('its git state changed after the worktree folder was deleted; its logs hold the new commits')
+      } else {
+        try {
+          removeOnOneVolume(verifiedGitDirToRemove, gitFolderDev)
+        } catch (err) {
+          gitFolderKept = keptGitFolder(`it could not be removed (${errorText(err)})`)
         }
       }
 
-      // 6. Delete the owned branch at the tip read above.
+      // 7. Delete the owned branch at the tip read above, once its git folder is gone.
       let branchDeleted = false
       let branchParked: string | undefined
-      let branchReason: string | null = null
-      if (deletableBranch && branchTip) {
+      let branchReason: string | null = gitFolderKept
+      if (!gitFolderKept && deletableBranch && branchTip) {
         const deleted = await deleteOwnedBranch(entryRoot, deletableBranch, branchTip, { parkAs: baseName })
         branchDeleted = deleted.deleted
         branchParked = deleted.parked
         branchReason = deleted.reason
         if (branchParked && meta?.keepRef) {
-          await chainKeepRef(entryRoot, meta.keepRef, branchParked, baseName)
+          await chainKeepRef(entryRoot, meta.keepRef, branchParked, baseName, headTip ?? undefined)
         }
       }
 

@@ -1,5 +1,5 @@
 // Storage scan, leftover removal and license notices, against real git repositories, real processes
-// and temp folders.
+// and temp folders. Package: storage .
 
 import { execFileSync, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'

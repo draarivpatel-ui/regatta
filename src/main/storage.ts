@@ -1,5 +1,5 @@
 // What Regatta keeps on disk, leftover worktrees, Regatta's trash, and the open source notices for About.
-// Retiring a leftover worktree moves it
+// Package: storage (docs/tasks/storage.md, docs/tasks/trash.md). Retiring a leftover worktree moves it
 // into Regatta's trash through trashOwnedWorktree; only emptying the trash deletes the trashed folder,
 // its worktree git folder, and its owned branch after parking its commits.
 

@@ -1,10 +1,12 @@
 // Unit tests for moving lane worktrees to Regatta's trash and emptying trash in Settings > Storage.
+// Package: trash .
 
 import { execFileSync, spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
+  cpSync,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -23,10 +25,42 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
+
+// Hooks on rmSync and openSync, so a test can make something happen at the exact moment Empty trash deletes a
+// path or writes a file, and on renameSync and rmdirSync (`other`) so a crash sweep can stop at any step. They pass
+// every call through untouched unless a test sets `rmHook.fire`, `rmHook.open` or `rmHook.other`.
+const rmHook = vi.hoisted(() => ({
+  fire: null as null | ((path: string) => void),
+  open: null as null | ((path: string, flags: unknown) => void),
+  other: null as null | ((op: 'rename' | 'rmdir', path: string) => void)
+}))
+vi.mock('node:fs', async (orig) => {
+  const actual = await orig<typeof import('node:fs')>()
+  return {
+    ...actual,
+    renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
+      rmHook.other?.('rename', String(from))
+      return actual.renameSync(from, to)
+    },
+    rmdirSync: (path: Parameters<typeof actual.rmdirSync>[0], opts?: Parameters<typeof actual.rmdirSync>[1]) => {
+      rmHook.other?.('rmdir', String(path))
+      return actual.rmdirSync(path, opts)
+    },
+    openSync: (path: Parameters<typeof actual.openSync>[0], flags?: Parameters<typeof actual.openSync>[1], mode?: Parameters<typeof actual.openSync>[2]) => {
+      rmHook.open?.(String(path), flags)
+      return actual.openSync(path, flags ?? 'r', mode)
+    },
+    rmSync: (path: string, opts?: Parameters<typeof actual.rmSync>[1]) => {
+      rmHook.fire?.(String(path))
+      return actual.rmSync(path, opts)
+    }
+  }
+})
 import {
   addDetachedWorktree,
   addWorktree,
+  commitAll,
   emptyTrash,
   listTrash,
   LOST_ENTRY_RECORD,
@@ -142,6 +176,14 @@ function readXattr(target: string, attr: string): string {
     return execFileSync('xattr', ['-p', attr, target], { encoding: 'utf8' }).trim()
   }
   return execFileSync('getfattr', ['--only-values', '-n', attr, target], { encoding: 'utf8' }).trim()
+}
+
+/**
+ * Empty trash deletes one file at a time (never entering another volume): the worktree folder after renaming it to
+ * `<entry>/.regatta-deleting`, then the entry's own `entry.json`. True when `p` is `dir` or inside it.
+ */
+function inside(p: string, dir: string): boolean {
+  return p === dir || p.startsWith(`${dir}/`)
 }
 
 describe('trashOwnedWorktree, listTrash and emptyTrash', { timeout: 20000 }, () => {
@@ -467,17 +509,26 @@ describe('trashOwnedWorktree, listTrash and emptyTrash', { timeout: 20000 }, () 
     expect(trashedB.status).toBe('trashed')
     expect(trashedC.status).toBe('trashed')
 
-    // Point B's gitdir file at another path, and C's gitdir file at the folder without /.git.
-    const otherTarget = join(temp('regatta-trash-other-gitdir-'), '.git')
+    // Point B's gitdir file at a path outside the entry where nothing exists right now (a copy the user re-attached
+    // there, renamed away or on an unmounted volume: left alone entirely, fix round 1 F3), and C's gitdir file at the
+    // folder inside the entry without /.git.
+    const otherTarget = join(temp('regatta-trash-other-gitdir-'), 'gone', '.git')
     writeFileSync(join(gitDirB, 'gitdir'), `${otherTarget}\n`)
     writeFileSync(join(gitDirC, 'gitdir'), `${realpathSync(trashedC.trashPath!)}\n`)
 
     const { outcomes } = await emptyTrash(worktreesDir)
-    expect(outcomes.every((o) => o.status === 'deleted')).toBe(true)
+    const byBranch = new Map(outcomes.map((o) => [o.branch, o]))
+    expect(byBranch.get(recordA.branch!)?.status).toBe('deleted')
+    expect(byBranch.get(branchB)?.status).toBe('skipped')
+    expect(byBranch.get(branchB)?.reason ?? '').toContain('re-attached elsewhere, left alone')
+    expect(byBranch.get(branchC)?.status).toBe('deleted')
 
-    // Repaired entry A's git folder is deleted; B and C keep their git folders because gitdir did not match <folder>/.git.
+    // Repaired entry A's git folder is deleted; B is left alone, folder and all; C keeps its git folder because
+    // gitdir did not match <folder>/.git.
     expect(existsSync(gitDirA)).toBe(false)
     expect(existsSync(gitDirB)).toBe(true)
+    expect(existsSync(trashedB.trashPath!)).toBe(true)
+    expect(readFileSync(join(gitDirB, 'gitdir'), 'utf8')).toBe(`${otherTarget}\n`)
     expect(existsSync(gitDirC)).toBe(true)
   })
 
@@ -1165,3 +1216,1184 @@ describe('trashOwnedWorktree, listTrash and emptyTrash', { timeout: 20000 }, () 
   })
 })
 
+describe('trash-4: the git folder, re-attached worktrees, the last check, keep ref order, unfinished entries', { timeout: 30000 }, () => {
+  const REATTACHED = 're-attached elsewhere, left alone'
+  const UNFINISHED = 'unfinished; Empty trash finishes it'
+
+  /** A commit written straight into a worktree's git folder by a git process running elsewhere. */
+  function lateCommit(repo: string, gitDir: string, message = 'late commit'): string {
+    const tree = sh(['hash-object', '-w', '-t', 'tree', '/dev/null'], repo).trim()
+    const head = sh(['--git-dir', gitDir, 'rev-parse', 'HEAD'], repo).trim()
+    const sha = sh([...IDENTITY, '--git-dir', gitDir, 'commit-tree', tree, '-p', head, '-m', message], repo).trim()
+    sh(['--git-dir', gitDir, 'update-ref', '--create-reflog', '-m', `commit: ${message}`, 'HEAD', sha], repo)
+    return sha
+  }
+
+  function commitIn(dir: string, file: string, text: string): string {
+    writeFileSync(join(dir, file), text)
+    sh(['add', file], dir)
+    sh([...IDENTITY, 'commit', '-q', '-m', `add ${file}`], dir)
+    return sh(['rev-parse', 'HEAD'], dir).trim()
+  }
+
+  function branchThere(repo: string, branch: string): boolean {
+    return sh(['branch', '--list', branch], repo).includes(branch)
+  }
+
+  it('keeps the git folder, its lock and the lane branch when a submodule initialised in the lane holds a commit (Sonnet P1-1)', async () => {
+    const base = temp('regatta-trash-sm-')
+    const sub = join(base, 'sub')
+    mkdirSync(sub)
+    sh(['init', '-b', 'main'], sub)
+    commitIn(sub, 'lib.txt', 'lib\n')
+    const repo = join(base, 'main')
+    mkdirSync(repo)
+    sh(['init', '-b', 'main'], repo)
+    writeFileSync(join(repo, 'README.md'), '# p\n')
+    sh(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'sm'], repo)
+    sh(['add', '-A'], repo)
+    sh([...IDENTITY, 'commit', '-q', '-m', 'main with submodule'], repo)
+    const worktreesDir = temp('regatta-trash-sm-wts-')
+    const path = join(worktreesDir, 'sublane')
+    const branch = 'regatta/sublane'
+    await addWorktree(repo, path, branch, 'main')
+    const record: OwnedWorktree = { root: repo, path, branch, identity: worktreeIdentity(path), dir: worktreesDir, keepAs: 'sublane' }
+    const gitDir = record.identity!.split('|')[0]!
+    sh(['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '-q'], path)
+    expect(readFileSync(join(path, 'sm', '.git'), 'utf8')).toContain('/worktrees/sublane/modules/sm')
+    // The agent commits inside the submodule; Regatta commits the lane.
+    const subCommit = commitIn(join(path, 'sm'), 'agent.txt', 'agent work in the submodule\n')
+    await commitAll(path, 'lane work')
+    const moduleGitDir = join(gitDir, 'modules', 'sm')
+    // The submodule's own work tree setting names the lane folder, which Empty trash deletes: point git elsewhere to read it.
+    const subCommits = (): string => sh(['--git-dir', moduleGitDir, '--work-tree', base, 'rev-list', '--all'], repo)
+    expect(subCommits()).toContain(subCommit)
+
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    const outcome = outcomes[0]!
+    // The worktree folder may go; the git folder, its lock and the branch stay, and the result names the folder and what is unknown.
+    expect(existsSync(res.trashPath!)).toBe(false)
+    expect(existsSync(gitDir)).toBe(true)
+    expect(existsSync(join(gitDir, 'locked'))).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(outcome.branchDeleted).not.toBe(true)
+    expect(outcome.reason ?? '').toContain(realpathSync(gitDir))
+    expect(outcome.reason ?? '').toContain('modules')
+    expect(subCommits()).toContain(subCommit)
+  })
+
+  it('keeps the git folder while a rebase --autostash is in progress (Sonnet P3-3)', async () => {
+    const { repo, worktreesDir, path, branch, record } = await makeLane('autostash-lane')
+    const gitDir = record.identity!.split('|')[0]!
+    commitIn(path, 'README.md', 'lane version\n')
+    commitIn(repo, 'README.md', 'main version\n')
+    writeFileSync(join(path, 'tracked-dir', 'item.txt'), 'UNCOMMITTED EDIT in the lane\n')
+    try {
+      sh([...IDENTITY, 'rebase', '--autostash', 'main'], path)
+    } catch {
+      // The conflict is the point: the rebase stops with the autostash held in the git folder.
+    }
+    const autostash = join(gitDir, 'rebase-merge', 'autostash')
+    const stashId = readFileSync(autostash, 'utf8').trim()
+    expect(stashId).toMatch(/^[0-9a-f]{40,64}$/)
+
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(readFileSync(autostash, 'utf8').trim()).toBe(stashId)
+    expect(existsSync(join(gitDir, 'locked'))).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(outcomes[0]!.reason ?? '').toContain('rebase-merge')
+    expect(sh(['cat-file', '-t', stashId], repo).trim()).toBe('commit')
+    // The autostash commit is also kept by a ref, not only by the file name in the kept folder (fix round 1 V4-1).
+    expect(() => sh(['merge-base', '--is-ancestor', stashId, res.keepRef!], repo)).not.toThrow()
+  })
+
+  it('keeps the git folder for any entry not on the known list: rebase-apply, sequencer, BISECT_LOG, an unknown file', async () => {
+    const unknowns: Array<{ name: string; make: (gitDir: string) => void }> = [
+      { name: 'rebase-apply', make: (g) => (mkdirSync(join(g, 'rebase-apply')), writeFileSync(join(g, 'rebase-apply', 'patch'), 'p\n')) },
+      { name: 'sequencer', make: (g) => (mkdirSync(join(g, 'sequencer')), writeFileSync(join(g, 'sequencer', 'todo'), 'pick x\n')) },
+      { name: 'BISECT_LOG', make: (g) => writeFileSync(join(g, 'BISECT_LOG'), 'git bisect start\n') },
+      { name: 'mystery.txt', make: (g) => writeFileSync(join(g, 'mystery.txt'), 'who knows\n') },
+      { name: 'refs/heads', make: (g) => (mkdirSync(join(g, 'refs', 'heads'), { recursive: true }), writeFileSync(join(g, 'refs', 'heads', 'x'), 'y\n')) }
+    ]
+    for (const unknown of unknowns) {
+      const { repo, worktreesDir, branch, record } = await makeLane(`unknown-${unknown.name.replace(/[^a-z]/gi, '')}`)
+      const gitDir = record.identity!.split('|')[0]!
+      const res = await trashOwnedWorktree(record)
+      expect(res.status, unknown.name).toBe('trashed')
+      unknown.make(gitDir)
+      const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+      expect(outcomes, unknown.name).toHaveLength(1)
+      expect(existsSync(join(gitDir, unknown.name)), unknown.name).toBe(true)
+      expect(existsSync(join(gitDir, 'locked')), unknown.name).toBe(true)
+      expect(branchThere(repo, branch), unknown.name).toBe(true)
+      expect(outcomes[0]!.reason ?? '', unknown.name).toContain(unknown.name.split('/')[0]!)
+    }
+  }, 60000)
+
+  it('never loses a commit made at the moment the entry folder is deleted (Sonnet P3-1)', async () => {
+    const { repo, worktreesDir, record } = await makeLane('window-lane')
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const trashPath = res.trashPath!
+    const entryPath = dirname(trashPath)
+    sh(['switch', '-q', '--detach'], trashPath)
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    let landed = ''
+    rmHook.fire = (p) => {
+      if (landed || p !== join(entryPath, 'entry.json')) return
+      landed = lateCommit(repo, gitDir)
+    }
+    let outcomes
+    try {
+      outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.fire = null
+    }
+    expect(landed).toMatch(/^[0-9a-f]{40,64}$/)
+    expect(outcomes).toHaveLength(1)
+    // The git folder is kept (its logs hold the new commit) and the result says so.
+    expect(existsSync(gitDir)).toBe(true)
+    expect(readFileSync(join(gitDir, 'logs', 'HEAD'), 'utf8')).toContain(landed)
+    expect(outcomes[0]!.reason ?? '').toContain(gitDir)
+    expect(sh(['rev-list', '--all', '--reflog'], repo)).toContain(landed)
+  })
+
+  it('leaves alone a trashed worktree the user copied back to its original path and re-attached (Argon P1-1 case A)', async () => {
+    const { repo, worktreesDir, path, branch, record } = await makeLane('case-a-lane')
+    const gitDir = record.identity!.split('|')[0]!
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    cpSync(res.trashPath!, path, { recursive: true })
+    sh(['worktree', 'repair', path], repo)
+    sh(['worktree', 'unlock', path], repo)
+    writeFileSync(join(path, 'staged-only.txt'), 'precious staged work\n')
+    sh(['add', 'staged-only.txt'], path)
+    rmSync(join(path, 'staged-only.txt'))
+    writeFileSync(join(path, 'draft.txt'), 'draft in the restored copy\n')
+    const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+    const indexBefore = readFileSync(join(gitDir, 'index'))
+    const headBefore = readFileSync(join(gitDir, 'HEAD'), 'utf8')
+    const refsBefore = sh(['for-each-ref'], repo)
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(REATTACHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+    expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+    expect(readFileSync(join(gitDir, 'HEAD'), 'utf8')).toBe(headBefore)
+    expect(sh(['for-each-ref'], repo)).toBe(refsBefore)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(readFileSync(join(path, 'draft.txt'), 'utf8')).toBe('draft in the restored copy\n')
+    expect(sh(['status', '--short'], path)).toContain('staged-only.txt')
+    expect(existsSync(res.trashPath!)).toBe(true)
+  })
+
+  for (const variant of ['repair-failed', 'lost-record'] as const) {
+    it(`leaves alone a trashed worktree the user copied to another path and re-attached, ${variant} (Argon P1-1 case B)`, async () => {
+      const { repo, worktreesDir, branch, record } = await makeLane(`case-b-${variant}`)
+      const gitDir = record.identity!.split('|')[0]!
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      const entryDir = dirname(res.trashPath!)
+      if (variant === 'repair-failed') {
+        const meta = JSON.parse(readFileSync(join(entryDir, 'entry.json'), 'utf8')) as TrashEntryMeta
+        writeFileSync(join(entryDir, 'entry.json'), JSON.stringify({ ...meta, repaired: false, repairError: 'simulated failed repair' }))
+      } else {
+        unlinkSync(join(entryDir, 'entry.json'))
+      }
+      const elsewhere = join(temp('regatta-trash-rescued-'), 'rescued')
+      cpSync(res.trashPath!, elsewhere, { recursive: true })
+      sh(['worktree', 'repair', elsewhere], repo)
+      writeFileSync(join(elsewhere, 'staged-only.txt'), 'precious staged work\n')
+      sh(['add', 'staged-only.txt'], elsewhere)
+      rmSync(join(elsewhere, 'staged-only.txt'))
+      writeFileSync(join(elsewhere, 'draft.txt'), 'draft elsewhere\n')
+      const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+      expect(gitdirBefore.trim()).toBe(join(realpathSync(elsewhere), '.git'))
+      const indexBefore = readFileSync(join(gitDir, 'index'))
+      const refsBefore = sh(['for-each-ref'], repo)
+
+      const listed = await listTrash(worktreesDir)
+      expect(listed).toHaveLength(1)
+      expect(listed[0]!.note).toBe(REATTACHED)
+      expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+      const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('skipped')
+      expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+
+      expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+      expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+      expect(sh(['for-each-ref'], repo)).toBe(refsBefore)
+      expect(branchThere(repo, branch)).toBe(true)
+      expect(readFileSync(join(elsewhere, 'draft.txt'), 'utf8')).toBe('draft elsewhere\n')
+      expect(sh(['status', '--short'], elsewhere)).toContain('staged-only.txt')
+    })
+  }
+
+  it('makes the worktree HEAD the first parent of the keep ref after a detach and a commit in the trash (Argon P3-2)', async () => {
+    const { repo, worktreesDir, path, record } = await makeLane('first-parent-lane')
+    commitIn(path, 'work.txt', 'lane work\n')
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    sh(['switch', '-q', '--detach'], res.trashPath!)
+    const late = commitIn(res.trashPath!, 'late.txt', 'made in the trash\n')
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('deleted')
+    expect(outcomes[0]!.branchDeleted).toBe(true)
+    expect(outcomes[0]!.keepRef).toBe(res.keepRef)
+    expect(sh(['rev-parse', `${res.keepRef!}^1`], repo).trim()).toBe(late)
+  })
+
+  it('finishes an entry left holding only entry.json by an interrupted Empty trash (Sonnet P3-4)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('unfinished-json-lane')
+    const gitDir = record.identity!.split('|')[0]!
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    sh(['switch', '-q', '--detach'], res.trashPath!)
+    const late = commitIn(res.trashPath!, 'late.txt', 'made in the trash\n')
+    // Stop Empty trash right after it deleted the worktree folder, as a crash there would. The mark that it did is
+    // already on disk then (a real crash never reaches the error handler that writes entry.json again).
+    let markSeen: TrashEntryMeta | null = null
+    rmHook.fire = (p) => {
+      if (p !== join(entryDir, 'entry.json')) return
+      markSeen = JSON.parse(readFileSync(p, 'utf8')) as TrashEntryMeta
+      throw new Error('simulated crash')
+    }
+    try {
+      await emptyTrash(worktreesDir, withRepoLock)
+    } finally {
+      rmHook.fire = null
+    }
+    expect(existsSync(res.trashPath!)).toBe(false)
+    expect(readdirSync(entryDir)).toEqual(['entry.json'])
+    expect(existsSync(gitDir)).toBe(true)
+    expect(markSeen).not.toBeNull()
+    expect(markSeen!.emptying).toBeTruthy()
+    expect(markSeen!.folderDeleted).toBeTruthy()
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(UNFINISHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('deleted')
+    expect(existsSync(entryDir)).toBe(false)
+    expect(existsSync(gitDir)).toBe(false)
+    expect(branchThere(repo, branch)).toBe(false)
+    expect(sh(['rev-list', res.keepRef!], repo)).toContain(late)
+  })
+
+  it('finishes an entry left as an empty folder without .git by an interrupted Empty trash, also with entry.json lost (Argon P3-3)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('unfinished-empty-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const trashPath = res.trashPath!
+    const entryDir = dirname(trashPath)
+    sh(['switch', '-q', '--detach'], trashPath)
+    const branchTipBefore = sh(['rev-parse', branch], repo).trim()
+    unlinkSync(join(entryDir, 'entry.json'))
+    // A commit lands while the worktree folder is being deleted: Empty trash stops and leaves the entry unfinished.
+    let landed = ''
+    rmHook.fire = (p) => {
+      if (landed || !inside(p, join(entryDir, '.regatta-deleting'))) return
+      landed = lateCommit(repo, gitDir)
+    }
+    let first
+    try {
+      first = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.fire = null
+    }
+    expect(landed).toMatch(/^[0-9a-f]{40,64}$/)
+    expect(first).toHaveLength(1)
+    expect(first[0]!.status).toBe('skipped')
+    expect(existsSync(gitDir)).toBe(true)
+    expect(existsSync(join(trashPath, '.git'))).toBe(false)
+    expect(readdirSync(entryDir)).toEqual(['entry.json'])
+    // An older build left the worktree folder itself behind, empty and without .git: that finishes the same way.
+    mkdirSync(trashPath)
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(UNFINISHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('deleted')
+    expect(existsSync(entryDir)).toBe(false)
+    expect(existsSync(gitDir)).toBe(false)
+    // With entry.json lost and HEAD detached, nothing names the lane branch, so it is kept as it was.
+    expect(sh(['rev-parse', branch], repo).trim()).toBe(branchTipBefore)
+    expect(sh(['rev-list', '--all'], repo)).toContain(landed)
+  })
+
+  // Fix round 1 (2026-10-17 verifiers): the probes in /tmp/rv-trash4-fresh, as asserting tests.
+  const MOVED_OUT = 'moved out of the trash; Regatta leaves it and its git records alone'
+
+  for (const failure of ['simulated', 'locked'] as const) {
+    it.skipIf(failure === 'locked' && process.platform !== 'darwin')(
+      `keeps the git folder, index and branch of a worktree moved out after Empty trash failed to delete it, ${failure} (fix round 1 F1)`,
+      async () => {
+        const { repo, worktreesDir, branch, record } = await makeLane(`moved-after-fail-${failure}`)
+        const gitDir = realpathSync(record.identity!.split('|')[0]!)
+        const res = await trashOwnedWorktree(record)
+        expect(res.status).toBe('trashed')
+        const trashPath = res.trashPath!
+        const entryDir = dirname(trashPath)
+        // Finder's Locked box (or any failure) stops the delete before anything in the folder goes.
+        if (failure === 'locked') {
+          execFileSync('chflags', ['uchg', trashPath])
+        } else {
+          rmHook.fire = (p) => {
+            if (inside(p, join(entryDir, '.regatta-deleting'))) throw new Error('simulated failure deleting the folder')
+          }
+        }
+        let first
+        try {
+          first = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+        } finally {
+          rmHook.fire = null
+          if (failure === 'locked') execFileSync('chflags', ['nouchg', trashPath])
+        }
+        expect(first).toHaveLength(1)
+        expect(first[0]!.status).toBe('error')
+        expect(existsSync(join(trashPath, '.git'))).toBe(true)
+
+        // The user moves the worktree out of the trash and keeps working in it.
+        const restored = join(temp('regatta-trash-restored-'), 'restored')
+        renameSync(trashPath, restored)
+        const work = commitIn(restored, 'after.txt', 'work after the restore\n')
+        writeFileSync(join(restored, 'staged-only.txt'), 'staged only\n')
+        sh(['add', 'staged-only.txt'], restored)
+        rmSync(join(restored, 'staged-only.txt'))
+        expect(readdirSync(entryDir)).toEqual(['entry.json'])
+        const indexBefore = readFileSync(join(gitDir, 'index'))
+
+        const listed = await listTrash(worktreesDir)
+        expect(listed).toHaveLength(1)
+        expect(listed[0]!.note).toBe(MOVED_OUT)
+        const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+        expect(outcomes).toHaveLength(1)
+        expect(outcomes[0]!.status).toBe('skipped')
+        expect(existsSync(gitDir)).toBe(true)
+        expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+        expect(branchThere(repo, branch)).toBe(true)
+        expect(sh(['status', '--short', '--branch'], restored)).toContain(`## ${branch}`)
+        expect(sh(['status', '--short'], restored)).toContain('staged-only.txt')
+        expect(sh(['rev-parse', 'HEAD'], restored).trim()).toBe(work)
+      }
+    )
+  }
+
+  for (const variant of ['recorded', 'lost-record'] as const) {
+    it(`leaves alone a copy put back at the original path without git worktree repair, which git uses, ${variant} (fix round 1 F2)`, async () => {
+      const { repo, worktreesDir, path, branch, record } = await makeLane(`plain-copy-${variant}`)
+      const gitDir = realpathSync(record.identity!.split('|')[0]!)
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      if (variant === 'lost-record') unlinkSync(join(dirname(res.trashPath!), 'entry.json'))
+      // A plain copy back: its .git file names the same git folder, so git works in it although gitdir names the trash.
+      cpSync(res.trashPath!, path, { recursive: true })
+      const work = commitIn(path, 'copy-work.txt', 'work in the copy\n')
+      writeFileSync(join(path, 'staged-only.txt'), 'staged only\n')
+      sh(['add', 'staged-only.txt'], path)
+      rmSync(join(path, 'staged-only.txt'))
+      const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+      expect(gitdirBefore.trim()).toBe(join(realpathSync(res.trashPath!), '.git'))
+      const indexBefore = readFileSync(join(gitDir, 'index'))
+      const refsBefore = sh(['for-each-ref'], repo)
+
+      const listed = await listTrash(worktreesDir)
+      expect(listed).toHaveLength(1)
+      expect(listed[0]!.note).toBe(REATTACHED)
+      const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('skipped')
+      expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+
+      expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+      expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+      expect(sh(['for-each-ref'], repo)).toBe(refsBefore)
+      expect(branchThere(repo, branch)).toBe(true)
+      expect(sh(['status', '--short', '--branch'], path)).toContain(`## ${branch}`)
+      expect(sh(['status', '--short'], path)).toContain('staged-only.txt')
+      expect(sh(['rev-parse', 'HEAD'], path).trim()).toBe(work)
+      expect(existsSync(res.trashPath!)).toBe(true)
+    })
+  }
+
+  it('leaves alone a re-attached copy that is not at its path for a moment while the trash is listed and emptied (fix round 1 F3)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('brief-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    const meta = JSON.parse(readFileSync(join(entryDir, 'entry.json'), 'utf8')) as TrashEntryMeta
+    writeFileSync(join(entryDir, 'entry.json'), JSON.stringify({ ...meta, repaired: false, repairError: 'simulated failed repair' }))
+    const elsewhere = join(temp('regatta-trash-brief-'), 'rescued')
+    cpSync(res.trashPath!, elsewhere, { recursive: true })
+    sh(['worktree', 'repair', elsewhere], repo)
+    writeFileSync(join(elsewhere, 'staged-only.txt'), 'staged only\n')
+    sh(['add', 'staged-only.txt'], elsewhere)
+    rmSync(join(elsewhere, 'staged-only.txt'))
+    const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+    expect(gitdirBefore.trim()).toBe(join(realpathSync(elsewhere), '.git'))
+    const indexBefore = readFileSync(join(gitDir, 'index'))
+
+    // The copy is renamed away (or its volume unmounted) exactly while Regatta looks.
+    const away = `${elsewhere}.away`
+    const whileAway = async <T>(fn: () => Promise<T>): Promise<T> => {
+      renameSync(elsewhere, away)
+      try {
+        return await fn()
+      } finally {
+        renameSync(away, elsewhere)
+      }
+    }
+    const listed = await whileAway(() => listTrash(worktreesDir))
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(REATTACHED)
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+    const { outcomes } = await whileAway(() => emptyTrash(worktreesDir, withRepoLock))
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+    expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(sh(['status', '--short'], elsewhere)).toContain('staged-only.txt')
+    expect(existsSync(res.trashPath!)).toBe(true)
+  })
+
+  it('never deletes or writes through a link that replaced the entry folder while Empty trash runs (fix round 1 F4)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('swap-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryPath = join(realpathSync(worktreesDir), TRASH_DIR_NAME, basename(dirname(res.trashPath!)))
+    const victim = temp('regatta-trash-victim-')
+    mkdirSync(join(victim, 'swap-lane'))
+    writeFileSync(join(victim, 'swap-lane', 'precious.txt'), 'not in the trash\n')
+    // Right after Empty trash marks entry.json (it syncs the entry folder), the entry folder is swapped for a link.
+    let swapped = false
+    rmHook.open = (p, flags) => {
+      if (swapped || p !== entryPath || flags !== 'r') return
+      swapped = true
+      renameSync(entryPath, `${entryPath}-moved`)
+      symlinkSync(victim, entryPath)
+    }
+    let outcomes
+    try {
+      outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.open = null
+    }
+    expect(swapped).toBe(true)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(readFileSync(join(victim, 'swap-lane', 'precious.txt'), 'utf8')).toBe('not in the trash\n')
+    // Nothing was written into the folder the link leads to either.
+    expect(readdirSync(victim)).toEqual(['swap-lane'])
+    expect(readdirSync(join(victim, 'swap-lane'))).toEqual(['precious.txt'])
+    expect(existsSync(join(`${entryPath}-moved`, 'swap-lane', 'README.md'))).toBe(true)
+    expect(existsSync(gitDir)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+  })
+
+  it('leaves alone a copy re-attached at the original path with relative paths (fix round 1 TS-1)', async () => {
+    const repo = makeRepo()
+    const worktreesDir = temp('regatta-trash-rel-a-')
+    const path = join(worktreesDir, 'rel-a-lane')
+    const branch = 'regatta/rel-a-lane'
+    sh(['worktree', 'add', '--relative-paths', '-b', branch, path, 'main'], repo)
+    const record: OwnedWorktree = { root: repo, path, branch, identity: worktreeIdentity(path), dir: worktreesDir, keepAs: 'rel-a-lane' }
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    cpSync(res.trashPath!, path, { recursive: true })
+    sh(['worktree', 'repair', '--relative-paths', path], repo)
+    const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+    expect(gitdirBefore.trim()).toMatch(/^\.\.\//)
+    writeFileSync(join(path, 'staged-only.txt'), 'staged only\n')
+    sh(['add', 'staged-only.txt'], path)
+    rmSync(join(path, 'staged-only.txt'))
+    const indexBefore = readFileSync(join(gitDir, 'index'))
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(REATTACHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+    expect(readFileSync(join(gitDir, 'index')).equals(indexBefore)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(sh(['status', '--short'], path)).toContain('staged-only.txt')
+    expect(existsSync(res.trashPath!)).toBe(true)
+  })
+
+  it('finishes an unfinished entry of a repository with worktree.useRelativePaths (fix round 1 TS-1)', async () => {
+    const repo = makeRepo()
+    sh(['config', 'worktree.useRelativePaths', 'true'], repo)
+    const worktreesDir = temp('regatta-trash-rel-unfinished-')
+    const path = join(worktreesDir, 'rel-unfinished-lane')
+    const branch = 'regatta/rel-unfinished-lane'
+    await addWorktree(repo, path, branch, 'main')
+    const record: OwnedWorktree = { root: repo, path, branch, identity: worktreeIdentity(path), dir: worktreesDir, keepAs: 'rel-unfinished-lane' }
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    // Regatta's own repair kept the relative form: gitdir is resolved against the git folder, as git does.
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8').trim()).toMatch(/^\.\.\//)
+    const entryDir = dirname(res.trashPath!)
+    rmHook.fire = (p) => {
+      if (p === join(entryDir, 'entry.json')) throw new Error('simulated crash')
+    }
+    try {
+      await emptyTrash(worktreesDir, withRepoLock)
+    } finally {
+      rmHook.fire = null
+    }
+    expect(readdirSync(entryDir)).toEqual(['entry.json'])
+    expect(existsSync(gitDir)).toBe(true)
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(UNFINISHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('deleted')
+    expect(existsSync(entryDir)).toBe(false)
+    expect(existsSync(gitDir)).toBe(false)
+    expect(branchThere(repo, branch)).toBe(false)
+  })
+
+  for (const variant of ['late commit', 're-attached copy'] as const) {
+    it(`stops before deleting the worktree folder when, after the keep, there is a ${variant} (fix round 1 TS-3)`, async () => {
+      const { repo, worktreesDir, branch, record } = await makeLane(`step-four-${variant.replace(/[^a-z]/g, '')}`)
+      const gitDir = realpathSync(record.identity!.split('|')[0]!)
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      const trashPath = res.trashPath!
+      const metaFile = join(realpathSync(dirname(trashPath)), 'entry.json')
+      const elsewhere = join(temp('regatta-trash-step-four-'), 'rescued')
+      // The first entry.json write of Empty trash is its mark: after the snapshot and the keep, before the last check.
+      let fired = ''
+      rmHook.open = (p, flags) => {
+        if (fired || p !== metaFile || flags !== 'w') return
+        if (variant === 'late commit') {
+          fired = lateCommit(repo, gitDir)
+        } else {
+          cpSync(trashPath, elsewhere, { recursive: true })
+          sh(['worktree', 'repair', elsewhere], repo)
+          fired = elsewhere
+        }
+      }
+      let outcomes
+      try {
+        outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+      } finally {
+        rmHook.open = null
+      }
+      expect(fired).not.toBe('')
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('skipped')
+      if (variant === 'late commit') {
+        expect(outcomes[0]!.reason ?? '').toContain('git state changed while emptying')
+        expect(outcomes[0]!.reason ?? '').not.toContain('after its folder was deleted')
+        expect(readFileSync(join(gitDir, 'logs', 'HEAD'), 'utf8')).toContain(fired)
+      } else {
+        expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+        expect(readFileSync(join(gitDir, 'gitdir'), 'utf8').trim()).toBe(join(realpathSync(elsewhere), '.git'))
+      }
+      // The worktree folder itself was never touched.
+      expect(readdirSync(trashPath).length).toBeGreaterThan(0)
+      expect(existsSync(join(trashPath, 'README.md'))).toBe(true)
+      expect(existsSync(gitDir)).toBe(true)
+      expect(branchThere(repo, branch)).toBe(true)
+    })
+  }
+
+  it('keeps the git folder when a known name has the wrong kind or a link sits in logs/ or refs/worktree/ (fix round 1 TS-4)', async () => {
+    const rows: Array<{ label: string; named: string; make: (gitDir: string) => void }> = [
+      { label: 'a link in logs', named: 'logs/', make: (g) => symlinkSync(temp('regatta-trash-linked-logs-'), join(g, 'logs', 'linked')) },
+      {
+        label: 'a link in refs/worktree',
+        named: 'refs/worktree',
+        make: (g) => {
+          mkdirSync(join(g, 'refs', 'worktree'), { recursive: true })
+          symlinkSync(temp('regatta-trash-linked-ref-'), join(g, 'refs', 'worktree', 'linked'))
+        }
+      },
+      {
+        label: 'refs/worktree as a link',
+        named: 'refs/worktree',
+        make: (g) => {
+          mkdirSync(join(g, 'refs'), { recursive: true })
+          symlinkSync(temp('regatta-trash-linked-refs-'), join(g, 'refs', 'worktree'))
+        }
+      },
+      { label: 'index as a folder', named: 'index', make: (g) => (rmSync(join(g, 'index')), mkdirSync(join(g, 'index'))) },
+      { label: 'index.lock', named: 'index.lock', make: (g) => writeFileSync(join(g, 'index.lock'), '') }
+    ]
+    for (const row of rows) {
+      const { repo, worktreesDir, branch, record } = await makeLane(`shape-${row.label.replace(/[^a-z]/g, '')}`)
+      const gitDir = realpathSync(record.identity!.split('|')[0]!)
+      const res = await trashOwnedWorktree(record)
+      expect(res.status, row.label).toBe('trashed')
+      row.make(gitDir)
+      const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+      expect(outcomes, row.label).toHaveLength(1)
+      expect(existsSync(gitDir), row.label).toBe(true)
+      expect(existsSync(join(gitDir, 'locked')), row.label).toBe(true)
+      expect(branchThere(repo, branch), row.label).toBe(true)
+      expect(outcomes[0]!.reason ?? '', row.label).toContain(row.named)
+    }
+  }, 60000)
+
+  it('keeps the worktree HEAD first in the keep ref when no branch is deleted (fix round 1 TS-5)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('no-branch-lane')
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    const meta = JSON.parse(readFileSync(join(entryDir, 'entry.json'), 'utf8')) as TrashEntryMeta
+    writeFileSync(join(entryDir, 'entry.json'), JSON.stringify({ ...meta, branch: null }))
+    sh(['switch', '-q', '--detach'], res.trashPath!)
+    const late = commitIn(res.trashPath!, 'late.txt', 'made in the trash\n')
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('deleted')
+    expect(outcomes[0]!.branchDeleted).toBe(false)
+    expect(outcomes[0]!.branchParked).toBeUndefined()
+    expect(outcomes[0]!.keepRef).toBe(res.keepRef)
+    expect(sh(['rev-parse', `${res.keepRef!}^1`], repo).trim()).toBe(late)
+    expect(branchThere(repo, branch)).toBe(true)
+  })
+
+  it('repairTrashedWorktree on its own never takes back a git folder a copy elsewhere was re-attached to (fix round 1 TS-6)', async () => {
+    const { repo, record } = await makeLane('direct-repair-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    const meta = JSON.parse(readFileSync(join(entryDir, 'entry.json'), 'utf8')) as TrashEntryMeta
+    writeFileSync(join(entryDir, 'entry.json'), JSON.stringify({ ...meta, repaired: false, repairError: 'simulated failed repair' }))
+    const elsewhere = join(temp('regatta-trash-direct-'), 'rescued')
+    cpSync(res.trashPath!, elsewhere, { recursive: true })
+    sh(['worktree', 'repair', elsewhere], repo)
+    const gitdirBefore = readFileSync(join(gitDir, 'gitdir'), 'utf8')
+    const updated = await repairTrashedWorktree(entryDir)
+    expect(updated.repaired).toBe(false)
+    expect(updated.repairError).toBe(REATTACHED)
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8')).toBe(gitdirBefore)
+    expect(readFileSync(join(elsewhere, '.git'), 'utf8')).toContain(gitDir)
+  })
+
+  // Fix round 2 (2026-10-17 verifiers): the probes in /tmp/ts-tools/zz-gap.test.ts.txt and /tmp/fa-trash4, as
+  // asserting tests.
+  function danglingCommit(repo: string, message: string): string {
+    const tree = sh(['hash-object', '-w', '-t', 'tree', '/dev/null'], repo).trim()
+    const head = sh(['rev-parse', 'HEAD'], repo).trim()
+    return sh([...IDENTITY, 'commit-tree', tree, '-p', head, '-m', message], repo).trim()
+  }
+
+  it('keeps the git folder when a plain copy appears at the original path while the entry folder is deleted (fix round 2 TS-A)', async () => {
+    const { repo, worktreesDir, path, branch, record } = await makeLane('late-copy-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const trashPath = res.trashPath!
+    const entryPath = dirname(trashPath)
+    const backup = join(temp('regatta-trash-backup-'), 'backup')
+    cpSync(trashPath, backup, { recursive: true })
+    // After the worktree folder is gone and before the git folder is, the user puts a plain copy back and stages a
+    // file there. Only the last re-attached check before the git folder is deleted can see it.
+    let fired = false
+    rmHook.fire = (p) => {
+      if (fired || p !== join(entryPath, 'entry.json')) return
+      fired = true
+      cpSync(backup, path, { recursive: true })
+      writeFileSync(join(path, 'staged-only.txt'), 'staged\n')
+      sh(['add', 'staged-only.txt'], path)
+    }
+    let outcomes
+    try {
+      outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.fire = null
+    }
+    expect(fired).toBe(true)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.reason ?? '').toContain(`a worktree at ${path} uses it now`)
+    expect(existsSync(gitDir)).toBe(true)
+    expect(existsSync(join(gitDir, 'locked'))).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(sh(['status', '--short', '--branch'], path)).toContain(`## ${branch}`)
+    expect(sh(['status', '--short'], path)).toContain('A  staged-only.txt')
+  })
+
+  for (const variant of ['ref', 'pseudo'] as const) {
+    it(`stops Empty trash when a write no reflog records lands after the keep, a changed ${variant} (fix round 2 ${variant === 'ref' ? 'TS-B' : 'TS-C'})`, async () => {
+      const { repo, worktreesDir, branch, record } = await makeLane(`late-${variant}-lane`)
+      const gitDir = realpathSync(record.identity!.split('|')[0]!)
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      const trashPath = res.trashPath!
+      const metaFile = join(realpathSync(dirname(trashPath)), 'entry.json')
+      const head = sh(['rev-parse', 'HEAD'], repo).trim()
+      // FETCH_HEAD already exists before Empty trash, so only its content changes (the same file name).
+      if (variant === 'pseudo') writeFileSync(join(gitDir, 'FETCH_HEAD'), `${head}\t\tbranch 'main' of /x\n`)
+      const late = danglingCommit(repo, `late ${variant}`)
+      let fired = false
+      rmHook.open = (p, flags) => {
+        if (fired || p !== metaFile || flags !== 'w') return
+        fired = true
+        if (variant === 'ref') {
+          // refs/worktree/* is not reflogged by default: only the refs/ part of the snapshot sees it.
+          sh(['--git-dir', gitDir, 'update-ref', 'refs/worktree/late', late], repo)
+        } else {
+          writeFileSync(join(gitDir, 'FETCH_HEAD'), `${late}\t\tbranch 'main' of /x\n`)
+        }
+      }
+      let outcomes
+      try {
+        outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+      } finally {
+        rmHook.open = null
+      }
+      expect(fired).toBe(true)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('skipped')
+      expect(outcomes[0]!.reason ?? '').toContain('git state changed while emptying')
+      expect(existsSync(join(trashPath, 'README.md'))).toBe(true)
+      expect(existsSync(gitDir)).toBe(true)
+      expect(branchThere(repo, branch)).toBe(true)
+      // The next Empty trash keeps the late commit and empties the entry.
+      const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+      expect(again[0]!.status).toBe('deleted')
+      expect(sh(['rev-list', '--all'], repo)).toContain(late)
+    })
+  }
+
+  it('never deletes through a link that replaced the trash folder itself while Empty trash runs (fix round 2 TS-D)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('parent-swap-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const trashDir = join(realpathSync(worktreesDir), TRASH_DIR_NAME)
+    const entryName = basename(dirname(res.trashPath!))
+    const entryPath = join(trashDir, entryName)
+    const victim = temp('regatta-trash-parent-victim-')
+    mkdirSync(join(victim, entryName, 'parent-swap-lane'), { recursive: true })
+    writeFileSync(join(victim, entryName, 'parent-swap-lane', 'precious.txt'), 'not in the trash\n')
+    writeFileSync(join(victim, entryName, 'entry.json'), 'victim file\n')
+    // Right after Empty trash marks entry.json (it syncs the entry folder), the whole trash folder becomes a link.
+    let swapped = false
+    rmHook.open = (p, flags) => {
+      if (swapped || p !== entryPath || flags !== 'r') return
+      swapped = true
+      renameSync(trashDir, `${trashDir}-moved`)
+      symlinkSync(victim, trashDir)
+    }
+    let outcomes
+    try {
+      outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.open = null
+    }
+    expect(swapped).toBe(true)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(readFileSync(join(victim, entryName, 'parent-swap-lane', 'precious.txt'), 'utf8')).toBe('not in the trash\n')
+    expect(readFileSync(join(victim, entryName, 'entry.json'), 'utf8')).toBe('victim file\n')
+    expect(readdirSync(join(victim, entryName)).sort()).toEqual(['entry.json', 'parent-swap-lane'])
+    expect(existsSync(join(`${trashDir}-moved`, entryName, 'parent-swap-lane', 'README.md'))).toBe(true)
+    expect(existsSync(gitDir)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+  })
+
+  it('drops the emptying mark again when an entry is skipped before anything was deleted (fix round 2 TS-F)', async () => {
+    const { repo, worktreesDir, record } = await makeLane('unmark-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    const metaFile = join(realpathSync(entryDir), 'entry.json')
+    let fired = ''
+    rmHook.open = (p, flags) => {
+      if (fired || p !== metaFile || flags !== 'w') return
+      fired = lateCommit(repo, gitDir)
+    }
+    let outcomes
+    try {
+      outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    } finally {
+      rmHook.open = null
+    }
+    expect(fired).not.toBe('')
+    expect(outcomes![0]!.status).toBe('skipped')
+    expect((JSON.parse(readFileSync(metaFile, 'utf8')) as TrashEntryMeta).emptying).toBeUndefined()
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBeUndefined()
+    expect(listed[0]!.repaired).toBe(true)
+  })
+
+  it('never trashes a lane of a reftable repository, whose logs Regatta cannot read (fix round 2 TS-G)', async () => {
+    const repo = temp('regatta-trash-reftable-')
+    sh(['init', '-q', '-b', 'main', '--ref-format=reftable'], repo)
+    sh(['config', 'user.name', 'Regatta Test'], repo)
+    sh(['config', 'user.email', 'test@regatta.local'], repo)
+    writeFileSync(join(repo, 'README.md'), '# p\n')
+    sh(['add', '.'], repo)
+    sh([...IDENTITY, 'commit', '-q', '-m', 'initial'], repo)
+    const worktreesDir = temp('regatta-trash-reftable-wts-')
+    const path = join(worktreesDir, 'rt-lane')
+    await addWorktree(repo, path, 'regatta/rt-lane', 'main')
+    const record: OwnedWorktree = { root: repo, path, branch: 'regatta/rt-lane', identity: worktreeIdentity(path), dir: worktreesDir, keepAs: 'rt-lane' }
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('kept')
+    expect(res.reason ?? '').toContain('reftable')
+    expect(existsSync(join(path, 'README.md'))).toBe(true)
+    expect(existsSync(join(realpathSync(worktreesDir), TRASH_DIR_NAME)) && readdirSync(join(realpathSync(worktreesDir), TRASH_DIR_NAME)).length).toBeFalsy()
+  })
+
+  it('leaves alone an entry whose git folder names the original path while a folder is there, even without a .git file (fix round 2 TS-G)', async () => {
+    const { repo, worktreesDir, path, branch, record } = await makeLane('orig-folder-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    // git still names the original path (as before a repair), and the user has made a folder there.
+    writeFileSync(join(gitDir, 'gitdir'), `${join(path, '.git')}\n`)
+    mkdirSync(path)
+    writeFileSync(join(path, 'notes.txt'), 'mine\n')
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(REATTACHED)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(outcomes[0]!.reason ?? '').toContain(REATTACHED)
+    expect(readFileSync(join(gitDir, 'gitdir'), 'utf8').trim()).toBe(join(path, '.git'))
+    expect(existsSync(join(res.trashPath!, 'README.md'))).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(readFileSync(join(path, 'notes.txt'), 'utf8')).toBe('mine\n')
+
+    // Regatta repaired this entry when it trashed it, so a git folder naming the original path was pointed there by
+    // someone else: it stays the user's even once nothing is at that path (a copy renamed away for a moment looks
+    // the same; trash-4 review 2026-10-25 finding 1). The reason gives the one command that hands it back.
+    rmSync(path, { recursive: true })
+    const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    expect(again).toHaveLength(1)
+    expect(again[0]!.status).toBe('skipped')
+    const reason = again[0]!.reason ?? ''
+    expect(reason).toContain('which does not exist now')
+    expect(existsSync(gitDir)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    const command = reason.match(/run (git -C .*) to give it back to the trash/)?.[1]
+    expect(command).toBeTruthy()
+    execFileSync('/bin/sh', ['-c', command!], { stdio: 'ignore' })
+    const last = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    expect(last).toHaveLength(1)
+    expect(last[0]!.status).toBe('deleted')
+    expect(existsSync(gitDir)).toBe(false)
+  })
+
+  it('says how to give back an entry whose re-attached copy was deleted, and that command works (fix round 2 R1, N3)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('gone-copy-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const rescued = join(temp('regatta-trash-gone-copy-'), 'rescued')
+    cpSync(res.trashPath!, rescued, { recursive: true })
+    sh(['worktree', 'repair', rescued], repo)
+    rmSync(rescued, { recursive: true })
+    // git's own prune does not help: the trash lock keeps the record.
+    sh(['worktree', 'prune'], repo)
+    expect(existsSync(gitDir)).toBe(true)
+
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(REATTACHED)
+    expect(listed[0]!.emptyError ?? '').toContain(`git now uses ${realpathSync(dirname(rescued))}/rescued, which does not exist now`)
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    const reason = outcomes[0]!.reason ?? ''
+    expect(reason).toContain('which does not exist now')
+    expect(existsSync(gitDir)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+
+    // Run exactly the command the reason gives, then Empty trash finishes the entry.
+    const command = reason.match(/run (git -C .*) to give it back to the trash/)?.[1]
+    expect(command).toBeTruthy()
+    execFileSync('/bin/sh', ['-c', command!], { stdio: 'ignore' })
+    const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    expect(again).toHaveLength(1)
+    expect(again[0]!.status).toBe('deleted')
+    expect(existsSync(gitDir)).toBe(false)
+    expect(branchThere(repo, branch)).toBe(false)
+  })
+
+  it('tells the user what to do with a duplicated entry whose git folder is gone (fix round 2 N3)', async () => {
+    const { repo, worktreesDir, record } = await makeLane('dup-lane')
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entry = dirname(res.trashPath!)
+    const dup = join(dirname(entry), `${basename(entry)} copy`)
+    cpSync(entry, dup, { recursive: true })
+    const late = commitIn(res.trashPath!, 'late.txt', 'late\n')
+    const first = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    expect(first.find((o) => o.entryPath === entry)?.status).toBe('deleted')
+    expect(sh(['rev-list', '--all'], repo)).toContain(late)
+    const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+    const dupOutcome = again.find((o) => o.entryPath === dup)
+    expect(dupOutcome?.reason ?? '').toContain('git keeps nothing of it here')
+    expect(dupOutcome?.reason ?? '').toContain('delete it in Finder')
+    expect(existsSync(join(dup, basename(res.trashPath!), 'README.md'))).toBe(true)
+  })
+
+  it('a crash at any step of Empty trash never leaves an entry listed as moved out, and the next one finishes it (fix round 2 N2)', async () => {
+    const MOVED_OUT_NOTE = 'moved out of the trash; Regatta leaves it and its git records alone'
+    let entryJsonDeletedAt = Number.POSITIVE_INFINITY
+    for (let k = 1; ; k++) {
+      const { repo, worktreesDir, record } = await makeLane(`crash-${k}`)
+      const gitDir = realpathSync(record.identity!.split('|')[0]!)
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      const entryDir = dirname(res.trashPath!)
+      const work = commitIn(res.trashPath!, 'w.txt', `work ${k}\n`)
+      // After the k-th delete, rename or write, every later one fails too: the disk is left as a crash leaves it.
+      let n = 0
+      let dead = false
+      let where = ''
+      const step = (what: string): void => {
+        if (dead) throw new Error('stopped')
+        n += 1
+        if (what === `rm ${join(entryDir, 'entry.json')}`) entryJsonDeletedAt = Math.min(entryJsonDeletedAt, n)
+        if (n === k) {
+          dead = true
+          where = what
+          throw new Error('simulated crash')
+        }
+      }
+      rmHook.fire = (p) => step(`rm ${p}`)
+      rmHook.other = (op, p) => step(`${op} ${p}`)
+      rmHook.open = (p, flags) => {
+        if (flags === 'w') step(`write ${p}`)
+      }
+      try {
+        await emptyTrash(worktreesDir, withRepoLock)
+      } finally {
+        rmHook.fire = null
+        rmHook.other = null
+        rmHook.open = null
+      }
+      if (!dead) break
+      const listed = await listTrash(worktreesDir)
+      for (const entry of listed) expect(entry.note ?? null, `crash ${k} at ${where}`).not.toBe(MOVED_OUT_NOTE)
+      await emptyTrash(worktreesDir, withRepoLock)
+      await emptyTrash(worktreesDir, withRepoLock)
+      expect(sh(['rev-list', '--all'], repo), `crash ${k} at ${where}`).toContain(work)
+      if (k <= entryJsonDeletedAt) {
+        // Up to the delete of entry.json, Empty trash finishes the entry: nothing is left over.
+        expect(readdirSync(join(realpathSync(worktreesDir), TRASH_DIR_NAME)), `crash ${k} at ${where}`).toEqual([])
+        expect(existsSync(gitDir), `crash ${k} at ${where}`).toBe(false)
+      }
+    }
+    expect(entryJsonDeletedAt).toBeLessThan(Number.POSITIVE_INFINITY)
+  }, 240000)
+
+  it('lists a stopped delete as unfinished, and as moved out once the user takes its folder out (fix round 2 N2)', async () => {
+    const { repo, worktreesDir, branch, record } = await makeLane('stopped-delete-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const entryDir = dirname(res.trashPath!)
+    const deleting = join(entryDir, '.regatta-deleting')
+    // Regatta stops for good as it deletes the first file of the renamed folder (nothing renames it back).
+    let dead = false
+    rmHook.fire = (p) => {
+      if (dead || inside(p, deleting)) {
+        dead = true
+        throw new Error('simulated crash')
+      }
+    }
+    rmHook.other = (op) => {
+      if (dead && op === 'rename') throw new Error('stopped')
+    }
+    try {
+      await emptyTrash(worktreesDir, withRepoLock)
+    } finally {
+      rmHook.fire = null
+      rmHook.other = null
+    }
+    expect(dead).toBe(true)
+    expect(readdirSync(entryDir).sort()).toEqual(['.regatta-deleting', 'entry.json'])
+    const listed = await listTrash(worktreesDir)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.note).toBe(UNFINISHED)
+
+    // The user takes the folder out and works in it: the entry is theirs to leave alone now.
+    const taken = join(temp('regatta-trash-taken-'), 'taken')
+    renameSync(deleting, taken)
+    const after = await listTrash(worktreesDir)
+    expect(after).toHaveLength(1)
+    expect(after[0]!.note).toBe('moved out of the trash; Regatta leaves it and its git records alone')
+    const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]!.status).toBe('skipped')
+    expect(existsSync(gitDir)).toBe(true)
+    expect(branchThere(repo, branch)).toBe(true)
+    expect(sh(['status', '--short', '--branch'], taken)).toContain(`## ${branch}`)
+  })
+
+  // A disk image mounted inside a lane (no sudo needed): the volume is not part of the worktree.
+  function makeImage(): string | null {
+    const img = join(temp('regatta-trash-img-'), 'vol.dmg')
+    try {
+      execFileSync('hdiutil', ['create', '-size', '2m', '-fs', 'HFS+', '-volname', 'regatta-test', img, '-quiet'], { stdio: 'ignore' })
+      return img
+    } catch {
+      return null
+    }
+  }
+  function attachImage(img: string, mountpoint: string): string {
+    const out = execFileSync('hdiutil', ['attach', img, '-mountpoint', mountpoint, '-nobrowse'], { encoding: 'utf8' })
+    const disk = out.match(/\/dev\/disk\d+/)?.[0]
+    if (!disk) throw new Error(`hdiutil attach named no disk: ${out}`)
+    return disk
+  }
+  function detachImage(disk: string): void {
+    // The mount point moves with the folder that holds it: unmount it where it is now, then detach the disk.
+    const line = execFileSync('mount', [], { encoding: 'utf8' })
+      .split('\n')
+      .find((l) => l.startsWith(`${disk}s`) || l.startsWith(`${disk} `))
+    const where = line?.match(/ on (.*) \(/)?.[1]
+    if (where) {
+      try {
+        execFileSync('umount', [where], { stdio: 'ignore' })
+      } catch {
+        // hdiutil detach -force below.
+      }
+    }
+    try {
+      execFileSync('hdiutil', ['detach', disk, '-force', '-quiet'], { stdio: 'ignore' })
+    } catch {
+      // Already detached.
+    }
+  }
+  function imageHolds(img: string, file: string): string | null {
+    const check = temp('regatta-trash-img-check-')
+    const disk = attachImage(img, check)
+    try {
+      return existsSync(join(check, file)) ? readFileSync(join(check, file), 'utf8') : null
+    } finally {
+      detachImage(disk)
+    }
+  }
+
+  it.skipIf(process.platform !== 'darwin')('never deletes files on a volume mounted inside a trashed lane (fix round 2 N1)', async (ctx) => {
+    const img = makeImage()
+    if (!img) ctx.skip()
+    const { repo, worktreesDir, path, branch, record } = await makeLane('mnt-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    const mp = join(path, 'mnt')
+    mkdirSync(mp)
+    let disk: string | null = attachImage(img!, mp)
+    try {
+      writeFileSync(join(mp, 'precious.txt'), 'on another volume\n')
+      const res = await trashOwnedWorktree(record)
+      expect(res.status).toBe('trashed')
+      const trashPath = res.trashPath!
+      const mpNow = join(trashPath, 'mnt')
+      // The mount moved with the folder that holds it.
+      expect(lstatSync(mpNow).dev).not.toBe(lstatSync(trashPath).dev)
+
+      const listed = await listTrash(worktreesDir)
+      expect(listed).toHaveLength(1)
+      expect(listed[0]!.inUse.join(' ')).toContain(`a volume mounted at ${mpNow} (eject it first)`)
+      const { outcomes } = await emptyTrash(worktreesDir, withRepoLock)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('skipped')
+      expect(outcomes[0]!.reason ?? '').toContain(`a volume is mounted at ${mpNow} inside it; eject it first`)
+      expect(readFileSync(join(mpNow, 'precious.txt'), 'utf8')).toBe('on another volume\n')
+      expect(existsSync(join(trashPath, '.git'))).toBe(true)
+      expect(existsSync(join(trashPath, 'README.md'))).toBe(true)
+      expect(existsSync(gitDir)).toBe(true)
+      expect(branchThere(repo, branch)).toBe(true)
+      expect((JSON.parse(readFileSync(join(dirname(trashPath), 'entry.json'), 'utf8')) as TrashEntryMeta).emptying).toBeUndefined()
+
+      // Ejected, the entry empties, and the volume still holds its file.
+      detachImage(disk)
+      disk = null
+      const again = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+      expect(again[0]!.status).toBe('deleted')
+      expect(imageHolds(img!, 'precious.txt')).toBe('on another volume\n')
+    } finally {
+      if (disk) detachImage(disk)
+    }
+  }, 60000)
+
+  it.skipIf(process.platform !== 'darwin')('stops before entering a volume mounted inside a lane while Empty trash deletes it (fix round 2 N1)', async (ctx) => {
+    const img = makeImage()
+    if (!img) ctx.skip()
+    // Put the file on the volume first.
+    const prep = temp('regatta-trash-img-prep-')
+    const prepDisk = attachImage(img!, prep)
+    try {
+      writeFileSync(join(prep, 'precious.txt'), 'on another volume\n')
+    } finally {
+      detachImage(prepDisk)
+    }
+    const { repo, worktreesDir, path, branch, record } = await makeLane('late-mnt-lane')
+    const gitDir = realpathSync(record.identity!.split('|')[0]!)
+    mkdirSync(join(path, 'zz-mnt'))
+    const res = await trashOwnedWorktree(record)
+    expect(res.status).toBe('trashed')
+    const trashPath = res.trashPath!
+    const deleting = join(dirname(trashPath), '.regatta-deleting')
+    // The volume is mounted after the last check, as the delete starts (the first file it deletes is .git).
+    let disk: string | null = null
+    rmHook.fire = (p) => {
+      if (disk || !inside(p, deleting)) return
+      disk = attachImage(img!, join(deleting, 'zz-mnt'))
+    }
+    try {
+      let outcomes
+      try {
+        outcomes = (await emptyTrash(worktreesDir, withRepoLock)).outcomes
+      } finally {
+        rmHook.fire = null
+      }
+      expect(disk).not.toBeNull()
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]!.status).toBe('error')
+      expect(outcomes[0]!.reason ?? '').toContain('a volume is mounted at')
+      // What is left is back under its own name, the volume and its file untouched.
+      expect(readFileSync(join(trashPath, 'zz-mnt', 'precious.txt'), 'utf8')).toBe('on another volume\n')
+      expect(existsSync(deleting)).toBe(false)
+      expect(existsSync(gitDir)).toBe(true)
+      expect(branchThere(repo, branch)).toBe(true)
+    } finally {
+      if (disk) detachImage(disk)
+    }
+    expect(imageHolds(img!, 'precious.txt')).toBe('on another volume\n')
+  }, 60000)
+})

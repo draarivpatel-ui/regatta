@@ -1,11 +1,11 @@
-// Sandbox tests for Regatta's automatic git calls.
+// Sandbox tests for Regatta's automatic git calls .
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { addWorktree, commitAll, diffBetween, diffFrom, hasChanges, headSha, sandboxGitArgs } from './git-ops'
+import { addWorktree, commitAll, diffBetween, diffFrom, dirtyTracked, hasChanges, headSha, sandboxGitArgs } from './git-ops'
 import { scanStorage } from '../storage'
 
 const IDENTITY = ['-c', 'user.name=Regatta Test', '-c', 'user.email=test@regatta.local', '-c', 'commit.gpgsign=false']
@@ -140,7 +140,7 @@ describe('1. Finding the filters fails closed (P1)', () => {
     expect(existsSync(marker)).toBe(false)
   }, 30_000)
 
-  it('(a1b) refuses with its name when a filter driver or config hook name contains "="', async () => {
+  it('(a1b) refuses with its name when a filter driver or config hook name contains "=" (Argon P1-1)', async () => {
     const repoFilter = temp('regatta-sandbox-eq-filter-')
     sh(['init', '-b', 'main'], repoFilter)
     writeFileSync(join(repoFilter, 'a.txt'), 'a\n')
@@ -179,7 +179,7 @@ describe('1. Finding the filters fails closed (P1)', () => {
     expect(existsSync(hookMarker)).toBe(false)
   }, 30_000)
 
-  it('finds a clean filter whose value starts with a newline so commitAll refuses', async () => {
+  it('finds a clean filter whose value starts with a newline so commitAll refuses (Argon P2-4)', async () => {
     const repo = temp('regatta-sandbox-nl-filter-')
     sh(['init', '-b', 'main'], repo)
     writeFileSync(join(repo, '.gitattributes'), '*.txt filter=lfs\n')
@@ -298,7 +298,7 @@ describe('3. A failed measurement is not zero (P2)', () => {
     await expect(diffBetween(repo, base, 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')).rejects.toThrow(/bad object|unknown revision|fatal/i)
   }, 30_000)
 
-  it('gives a number rather than an error when the index has a merge conflict (: needs merge)', async () => {
+  it('gives a number rather than an error when the index has a merge conflict (: needs merge, Sonnet P3-5)', async () => {
     const repo = temp('regatta-sandbox-conflict-')
     sh(['init', '-b', 'main'], repo)
     writeFileSync(join(repo, 'b.txt'), 'base\n')
@@ -326,7 +326,7 @@ describe('3. A failed measurement is not zero (P2)', () => {
     expect(stat.added).toBeGreaterThan(0)
   }, 30_000)
 
-  it('never runs a submodule-local clean filter during diffFrom or diffBetween', async () => {
+  it('never runs a submodule-local clean filter during diffFrom or diffBetween (Sonnet P3-1)', async () => {
     const sub = temp('regatta-sandbox-sub-')
     sh(['init', '-b', 'main'], sub)
     writeFileSync(join(sub, 'a.txt'), 'a\n')
@@ -406,4 +406,86 @@ describe('4. commitAll in a filter repository', () => {
       })
     }
   }, 60_000)
+})
+
+describe('5. Regatta never enters a submodule or nested repository (Sonnet P3-2, Argon P3-1)', () => {
+  /** A repository with a submodule `sm` whose own config has a clean filter, and a stat-dirty tracked file inside it. */
+  function withSubmodule(): { repo: string; marker: string } {
+    const base = temp('regatta-sandbox-sm-')
+    const sub = join(base, 'sub')
+    mkdirSync(sub)
+    sh(['init', '-b', 'main'], sub)
+    writeFileSync(join(sub, '.gitattributes'), '*.txt filter=f\n')
+    writeFileSync(join(sub, 'a.txt'), 'one\n')
+    sh(['add', '-A'], sub)
+    sh([...IDENTITY, 'commit', '-m', 'sub'], sub)
+    const repo = join(base, 'repo')
+    mkdirSync(repo)
+    sh(['init', '-b', 'main'], repo)
+    sh(['config', 'user.name', 'Regatta Test'], repo)
+    sh(['config', 'user.email', 'test@regatta.local'], repo)
+    writeFileSync(join(repo, 'top.txt'), 'x\n')
+    sh(['clone', '-q', sub, join(repo, 'sm')], base)
+    sh(['-c', 'advice.addEmbeddedRepo=false', 'add', '-A'], repo)
+    sh([...IDENTITY, 'commit', '-m', 'with submodule'], repo)
+    const scripts = temp('regatta-sandbox-sm-scripts-')
+    const marker = join(scripts, 'sub-filter-ran')
+    const filterScript = join(scripts, 'strip.sh')
+    writeFileSync(filterScript, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 })
+    sh(['config', 'filter.f.clean', filterScript], join(repo, 'sm'))
+    const future = new Date(Date.now() + 10_000)
+    utimesSync(join(repo, 'sm', 'a.txt'), future, future)
+    return { repo, marker }
+  }
+
+  it('commitAll never runs the submodule filter and leaves the submodule pointer out of what it commits', async () => {
+    const { repo, marker } = withSubmodule()
+    const gitlinkBefore = sh(['ls-tree', 'HEAD', 'sm'], repo).trim()
+    expect(await commitAll(repo, 'nothing here')).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+
+    // A new commit inside the submodule and a real change at the top: only the top change is committed.
+    writeFileSync(join(repo, 'sm', 'agent.txt'), 'agent work\n')
+    sh(['-c', 'filter.f.clean=', 'add', 'agent.txt'], join(repo, 'sm'))
+    sh([...IDENTITY, '-c', 'filter.f.clean=', 'commit', '-q', '-m', 'in the submodule'], join(repo, 'sm'))
+    rmSync(marker, { force: true })
+    utimesSync(join(repo, 'sm', 'a.txt'), new Date(Date.now() + 20_000), new Date(Date.now() + 20_000))
+    writeFileSync(join(repo, 'top.txt'), 'changed\n')
+    expect(await commitAll(repo, 'top change')).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+    expect(sh(['show', 'HEAD:top.txt'], repo)).toBe('changed\n')
+    expect(sh(['ls-tree', 'HEAD', 'sm'], repo).trim()).toBe(gitlinkBefore)
+  }, 30_000)
+
+  it('commitAll never runs the submodule filter while it checks for a top-level clean filter (fix round 1 TS-2)', async () => {
+    const { repo, marker } = withSubmodule()
+    // Any clean driver configured at the top makes commitAll look at what `git add -A` would stage, in a scratch index.
+    sh(['config', 'filter.lfsish.clean', 'cat'], repo)
+    writeFileSync(join(repo, 'top.txt'), 'changed\n')
+    expect(await commitAll(repo, 'top change')).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+    expect(sh(['show', 'HEAD:top.txt'], repo)).toBe('changed\n')
+  }, 30_000)
+
+  it('commitAll never runs the submodule filter when the user staged a file and changed it again (fix round 1 TS-2)', async () => {
+    const { repo, marker } = withSubmodule()
+    writeFileSync(join(repo, 'top.txt'), 'staged\n')
+    sh(['add', 'top.txt'], repo)
+    writeFileSync(join(repo, 'top.txt'), 'changed again\n')
+    expect(await commitAll(repo, 'top change')).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+    expect(sh(['show', 'HEAD~1:top.txt'], repo)).toBe('staged\n')
+    expect(sh(['show', 'HEAD:top.txt'], repo)).toBe('changed again\n')
+  }, 30_000)
+
+  it('hasChanges and dirtyTracked never run the submodule filter', async () => {
+    const { repo, marker } = withSubmodule()
+    expect(await hasChanges(repo)).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+    expect(await dirtyTracked(repo)).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+    // Positive control: plain git status enters the submodule and runs its filter.
+    sh(['status', '--porcelain'], repo)
+    expect(existsSync(marker)).toBe(true)
+  }, 30_000)
 })
