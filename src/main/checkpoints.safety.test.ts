@@ -169,6 +169,39 @@ describe('finding 1: absence is proven, directories and nested repositories are 
     expect(readFileSync(join(cwd, '.gitignore'), 'utf8')).toBe('secret.env\n')
     expect(existsSync(join(cwd, 'made.txt'))).toBe(false)
   })
+
+  it('keeps an ignored file that was already there even when the step replaced it (sol-loop S2)', async () => {
+    const cwd = workspace({ '.gitignore': 'secret.env\ncache/\n', 'secret.env': 'the only copy\n', 'cache/old.txt': 'old\n' })
+    const { c } = make()
+    const step = await turn(c, 's1', cwd, 'replace the ignored file', () => {
+      writeFileSync(join(cwd, '.gitignore'), '')
+      unlinkSync(join(cwd, 'secret.env'))
+      writeFileSync(join(cwd, 'secret.env'), 'agent copy\n')
+      writeFileSync(join(cwd, 'made.txt'), 'agent\n')
+    })
+    expect(step.files.map((f) => f.path)).toEqual(expect.arrayContaining(['secret.env', 'cache/old.txt']))
+
+    const res = await c.rollback(step.id)
+
+    expect(readFileSync(join(cwd, 'secret.env'), 'utf8')).toBe('agent copy\n')
+    expect(res.files.find((f) => f.path === 'secret.env')?.action).toBe('kept')
+    expect(readFileSync(join(cwd, 'cache', 'old.txt'), 'utf8')).toBe('old\n')
+    expect(existsSync(join(cwd, 'made.txt'))).toBe(false)
+  })
+
+  it('rolls back a rename: the old name comes back and the new name goes (sol-loop N1)', async () => {
+    const cwd = workspace()
+    const { c } = make()
+    const step = await turn(c, 's1', cwd, 'rename', () => {
+      renameSync(join(cwd, 'a.txt'), join(cwd, 'b.txt'))
+    })
+
+    const res = await c.rollback(step.id)
+
+    expect(readFileSync(join(cwd, 'a.txt'), 'utf8')).toBe('a original\n')
+    expect(existsSync(join(cwd, 'b.txt'))).toBe(false)
+    expect(res.files.find((f) => f.path === 'b.txt')?.action).toBe('rewound')
+  })
 })
 
 describe('finding 2: restore never follows symlinks out of the folder', () => {

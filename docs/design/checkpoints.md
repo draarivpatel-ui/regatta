@@ -34,6 +34,11 @@ For each file in the step:
 | equals the content at `end` (or both absent) | write the content at `start` (delete if it did not exist): "rewound" |
 | differs from `end` | leave it: "kept: you edited it since" |
 
+A file that was on disk when the step began but not in `start` (ignored, so not recorded) is never
+deleted: at the start the step lists those names (`git ls-files -o -i --exclude-standard --directory`,
+a wholly ignored folder as one `dir/` entry, nothing read) and keeps, as `existedPaths`, the step's
+files among them.
+
 Before writing, take `pre = snapshot("before roll back")` so nothing is ever lost. After writing,
 read every rewound file back and compare bytes; any mismatch is reported. The result lists each file
 with its action and line counts. **Redo** applies the same rule in reverse (content at `start` goes

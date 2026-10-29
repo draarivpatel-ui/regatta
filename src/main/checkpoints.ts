@@ -105,6 +105,8 @@ interface OpenStep {
   /** Another step was open in a related folder at the same time. */
   shared: boolean
   skipped: SkippedItem[]
+  /** What was on disk but left out of the start snapshot (ignored files, `dir/` for ignored folders). */
+  unrecorded?: Set<string>
   /** Device and inode of the workspace folder when the step registered. */
   rootId: string
   /** Set when the opening snapshot failed or was too slow: the step is recorded but never restorable. */
@@ -117,6 +119,8 @@ interface StoredStep extends CheckpointStep {
   cwd: string
   shadowDir: string
   rewoundPaths?: string[]
+  /** Files of this step that were on disk when it began but not recorded (ignored): rollback never deletes them. */
+  existedPaths?: string[]
   /** Which operation was left unfinished while `partial` is set. */
   partialDirection?: 'rollback' | 'redo'
   /** Device and inode of the workspace folder when the step was recorded. */
@@ -549,6 +553,16 @@ type Current =
 /** `operational` marks a disk error (for example EIO), as opposed to the path simply not being ours to touch. */
 type Gate = { ok: true; abs: string; st: Stats | null } | { ok: false; reason: string; operational?: boolean }
 
+/** Whether `path` was on disk but not recorded when the step began: listed itself, or inside a listed `dir/`. */
+function wasUnrecorded(unrecorded: Set<string> | undefined, path: string): boolean {
+  if (!unrecorded) return false
+  if (unrecorded.has(path)) return true
+  for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) {
+    if (unrecorded.has(path.slice(0, i + 1))) return true
+  }
+  return false
+}
+
 function entryMatches(cur: Current, entry: TreeEntry): boolean {
   switch (entry.kind) {
     case 'absent':
@@ -877,6 +891,7 @@ export class Checkpoints {
       rewoundPaths = []
       for (const p of r['rewoundPaths']) if (isSafeRelativePath(p)) rewoundPaths.push(p)
     }
+    const existedPaths = Array.isArray(r['existedPaths']) ? r['existedPaths'].filter(isSafeRelativePath) : []
     const skipped: SkippedItem[] = []
     if (Array.isArray(r['skipped'])) {
       for (const s of r['skipped'].slice(0, MAX_SKIPPED_RECORDED)) {
@@ -900,6 +915,7 @@ export class Checkpoints {
       shadowDir
     }
     if (rewoundPaths) step.rewoundPaths = rewoundPaths
+    if (existedPaths.length > 0) step.existedPaths = existedPaths
     if (r['shared'] === true) step.shared = true
     if (r['partial'] === true) step.partial = true
     if (r['partialDirection'] === 'rollback' || r['partialDirection'] === 'redo') step.partialDirection = r['partialDirection']
@@ -1186,6 +1202,10 @@ export class Checkpoints {
           const snap = await this.snapshot(ctx, 'step start', refOf(reg.id, 'start'))
           reg.start = snap.sha
           reg.skipped = snap.skipped
+          // Names only, nothing is read: what is here now but not in the snapshot (ignored), so rollback
+          // never deletes it as if the step had made it. A wholly ignored folder is listed once as `dir/`.
+          const listing = await this.gitText(ctx, ['ls-files', '-z', '-o', '-i', '--exclude-standard', '--directory'])
+          reg.unrecorded = new Set(listing.split('\0').filter(Boolean))
           reg.startedAt = Date.now()
         })
         this.openSteps.set(sessionId, reg)
@@ -1318,6 +1338,8 @@ export class Checkpoints {
         step.blockedReason = SHARED_REASON
       }
       if (merged.length > 0) step.skipped = merged.slice(0, MAX_SKIPPED_RECORDED)
+      const existed = files.filter((f) => wasUnrecorded(open.unrecorded, f.path)).map((f) => f.path)
+      if (existed.length > 0) step.existedPaths = existed
       this.allSteps.set(step.id, step)
       await this.trim(ctx)
       this.saveSteps(open.shadowDir)
@@ -1728,6 +1750,7 @@ export class Checkpoints {
       direction: dir
     })
     const rewound = new Set(step.rewoundPaths ?? [])
+    const existed = new Set(step.existedPaths ?? [])
 
     if (step.failed || step.unprotected) return refuse(step.blockedReason ?? step.failed ?? step.unprotected ?? 'This step cannot be restored.')
     if (step.shared) return refuse(step.blockedReason ?? SHARED_REASON)
@@ -1871,8 +1894,8 @@ export class Checkpoints {
           }
         }
         // Missing from the start snapshot does not prove a file is the step's: one an ignore rule kept out
-        // of it (a rule the step then removed) was already here. Only a file made after the step began is deleted.
-        if (dir === 'rollback' && to.kind === 'absent' && g.st && g.st.birthtimeMs < step.startedAt) {
+        // of it (a rule the step then removed) was already here, so it is never deleted.
+        if (dir === 'rollback' && to.kind === 'absent' && existed.has(f.path)) {
           note(f, 'kept', 'not touched: it was here before this step began')
           continue
         }
