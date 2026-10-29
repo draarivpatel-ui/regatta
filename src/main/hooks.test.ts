@@ -1,5 +1,6 @@
 // The hook server answers UserPromptSubmit and Stop only after the listener's promise settles.
 
+import { connect } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { HookServer } from './hooks'
 
@@ -33,6 +34,22 @@ describe('HookServer', () => {
       const next = new Promise<void>((r) => (release = r))
       ;(server as unknown as { listener: () => Promise<void> }).listener = () => next
     }
+  })
+
+  it('answers 400 to a request target that is not a URL instead of throwing (sol-loop S3)', async () => {
+    const server = new HookServer(() => undefined)
+    servers.push(server)
+    const port = await server.start()
+    const firstLine = await new Promise<string>((resolve, reject) => {
+      const socket = connect(port, '127.0.0.1', () => socket.write('GET //[ HTTP/1.1\r\nHost: x\r\n\r\n'))
+      socket.once('data', (data) => {
+        resolve(data.toString().split('\r\n')[0] ?? '')
+        socket.destroy()
+      })
+      socket.once('error', reject)
+    })
+    expect(firstLine).toBe('HTTP/1.1 400 Bad Request')
+    expect(await post(server, 'abc', 'PreToolUse')).toBe(204)
   })
 
   it('answers other events at once and still answers when the listener fails', async () => {

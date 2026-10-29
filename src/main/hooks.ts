@@ -38,7 +38,14 @@ export class HookServer {
 
   start(): Promise<number> {
     this.server = createServer((req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      // Any local program can connect: a request target that is not a URL is refused, never thrown.
+      let url: URL
+      try {
+        url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      } catch {
+        res.writeHead(400).end()
+        return
+      }
       const match = /^\/hook\/([\w-]+)\/([\w-]+)$/.exec(url.pathname)
       if (req.method !== 'POST' || !match || url.searchParams.get('t') !== this.token) {
         res.writeHead(404).end()
