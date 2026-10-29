@@ -500,6 +500,11 @@ export class AgentToolStore {
       failAllPending(new Error(`Could not start server: ${err.message}`))
     })
 
+    // A server that closes its input makes the next write fail with EPIPE, reported here (not to the write).
+    child.stdin?.on('error', (err) => {
+      failAllPending(new Error(`Server closed its input: ${err.message}`))
+    })
+
     child.on('exit', (code, signal) => {
       if (pending.size > 0) {
         const detail = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`

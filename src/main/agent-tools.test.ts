@@ -296,6 +296,22 @@ describe('AgentToolStore', () => {
     }
   })
 
+  it('fails verification instead of crashing when the server closes its input (sol-loop S4)', async () => {
+    const { store } = makeStore({ verifyTimeoutMs: 5000, killGraceMs: 300 })
+    // Answers initialize, then closes its input and stays alive, so the next request hits a closed pipe.
+    store.save({
+      name: 'closing-srv',
+      command: '/bin/sh',
+      args: ['-c', `read line; exec 0<&-; printf '%s\\n' '{"jsonrpc":"2.0","id":1,"result":{}}'; sleep 3`],
+      env: {},
+      agents: ['claude', 'codex']
+    })
+
+    const res = await store.verify('closing-srv')
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toMatch(/closed its input|EPIPE/)
+  })
+
   it('times out a server that never answers and kills its entire process group', async () => {
     const { store } = makeStore({ verifyTimeoutMs: 1200, killGraceMs: 300 })
     store.save({
