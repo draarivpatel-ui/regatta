@@ -2,7 +2,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { CHAT_AGENTS } from '../../shared/chat'
+import { CHAT_AGENTS, REASONING_LEVELS } from '../../shared/chat'
 import type { ChatAgent, ChatMessage, Conversation, Teammate } from '../../shared/chat'
 
 /** One file per conversation, so a conversation can be deleted on its own. */
@@ -97,6 +97,8 @@ function readConversation(file: string, fallbackId: string): Conversation | null
     access: object['access'] === 'write' ? 'write' : 'read',
     cliSessionId: filled(object['cliSessionId']),
     teammateId: filled(object['teammateId']),
+    account: filled(object['account']),
+    reasoning: REASONING_LEVELS[agent].find((level) => level === object['reasoning']) ?? '',
     messages,
     status,
     pending: writeRequestFrom(object['pending']),

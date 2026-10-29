@@ -66,6 +66,15 @@ describe('conversations on disk', () => {
     expect(loaded.pending).toEqual({ kind: 'workspace-write', request: 'edit the readme', summary: 'One line' })
   })
 
+  it('keeps the chosen sign-in and reasoning effort, and drops an effort the agent does not offer (sol-loop S11)', () => {
+    const dataDir = tempDir()
+    saveConversation(dataDir, conversation({ account: 'claude-work', reasoning: 'high' }))
+    saveConversation(dataDir, conversation({ id: 'c2', agent: 'codex', reasoning: 'max' }))
+    const loaded = loadConversations(dataDir)
+    expect(loaded.find((c) => c.id === 'c1')).toMatchObject({ account: 'claude-work', reasoning: 'high' })
+    expect(loaded.find((c) => c.id === 'c2')).toMatchObject({ account: null, reasoning: '' })
+  })
+
   it('skips a file it cannot read instead of losing the others', () => {
     const dataDir = tempDir()
     saveConversation(dataDir, conversation())
