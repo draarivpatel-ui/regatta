@@ -615,11 +615,3 @@ export class ServerStore {
   }
 }
 
-export function _testHelpers(): {
-  parseSshG: typeof parseSshG
-  parseKeyscan: typeof parseKeyscan
-  parseKeygenKnownHosts: typeof parseKeygenKnownHosts
-  resolve: typeof resolve
-} {
-  return { parseSshG, parseKeyscan, parseKeygenKnownHosts, resolve }
-}

@@ -27,8 +27,6 @@ export const LAYOUTS: LayoutDef[] = [
   { id: 'sixteen', label: 'Sixteen', capacity: 16, cols: 4, rows: 4, withPreview: false, sidebarPreview: false, hint: 'Needs a very large window' }
 ]
 
-export const MAX_PANES = 16
-
 /** Smallest comfortable pane, in CSS pixels. */
 export const MIN_PANE = { width: 300, height: 170 }
 

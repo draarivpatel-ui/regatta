@@ -150,11 +150,6 @@ export function nightRowLine(night: Night): string {
   return `${plural(night.runs.length, 'task', 'tasks')}, ${ready} ready`
 }
 
-/** Whether a night never got as far as starting a task (cancelled while it waited, or missed). */
-export function neverStarted(night: Night): boolean {
-  return night.runs.every((r) => r.startedAt === null)
-}
-
 /** When the first task of a night started, if one did. */
 export function nightStart(night: Night): number | null {
   const starts = night.runs.map((r) => r.startedAt).filter((t): t is number => t !== null)
