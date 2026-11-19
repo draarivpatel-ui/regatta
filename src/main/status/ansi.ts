@@ -16,20 +16,6 @@ export function hasVisibleText(chunk: string): boolean {
   return /\S/.test(stripAnsi(chunk).replace(/\r/g, ''))
 }
 
-/**
- * Appends a chunk to a rolling plain-text tail, keeping at most `max` characters.
- * Carriage returns rewind to the start of the current line, like a terminal would.
- */
-export function appendTail(tail: string, chunk: string, max = 4000): string {
-  let text = tail
-  for (const part of stripAnsi(chunk).split(/(\r\n|\r|\n)/)) {
-    if (part === '\n' || part === '\r\n') text += '\n'
-    else if (part === '\r') text = text.slice(0, text.lastIndexOf('\n') + 1)
-    else text += part
-  }
-  return text.length > max ? text.slice(text.length - max) : text
-}
-
 /** The last `n` non-empty lines of a tail. */
 export function lastLines(tail: string, n: number): string {
   const lines = tail.split('\n').filter((l) => l.trim().length > 0)

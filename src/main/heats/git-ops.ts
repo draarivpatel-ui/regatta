@@ -32,8 +32,6 @@ export interface DiffStat {
   removed: number
 }
 
-export const NO_CHANGES: DiffStat = { files: 0, added: 0, removed: 0 }
-
 /**
  * Every git command the engines run goes through `git`, with replace refs switched off: a
  * `refs/replace` entry must never redirect what a commit, a tree or a file means to Regatta.
@@ -76,9 +74,6 @@ const FILTER_CONFIG_PATTERN = '^filter\\..*\\.(clean|smudge|process)$'
 const SANDBOX_CONFIG_PATTERN = '^(filter\\..*\\.(clean|smudge|process)|hook\\..*\\.(command|event))$'
 const FILTER_CONFIG_LINE = /^filter\.([\s\S]+)\.(clean|smudge|process)$/
 const HOOK_CONFIG_LINE = /^hook\.([\s\S]+)\.(command|event)$/
-
-export const CLEAN_FILTER_KEPT =
-  'Kept: this repository uses a clean filter (for example Git LFS), so Regatta leaves the worktree for you; remove it with git worktree remove when you are done.'
 
 export class HooksSandboxError extends Error {}
 
@@ -391,20 +386,6 @@ export async function abortMerge(cwd: string): Promise<boolean> {
   if (!(await mergeHeadExists(cwd))) return false
   await git(['merge', '--abort'], cwd)
   return true
-}
-
-/**
- * Whose merge is underway in `cwd`: none, one for exactly the commit `sha` (ours: a merge of that
- * commit is what we ran), or one for anything else (the user's own).
- */
-export async function mergeHeadOwner(cwd: string, sha: string): Promise<'none' | 'ours' | 'foreign'> {
-  const file = join(await gitDirOf(cwd), 'MERGE_HEAD')
-  if (!existsSync(file)) return 'none'
-  const heads = readFileSync(file, 'utf8')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-  return heads.length === 1 && heads[0] === sha ? 'ours' : 'foreign'
 }
 
 /** The git folder that every worktree of this repository shares, as an absolute path. */
